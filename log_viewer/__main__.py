@@ -3,7 +3,7 @@
 import argparse
 import sys
 
-from . import SUPPORTED_LEVELS, iter_matches, normalize_level
+from . import SUPPORTED_LEVELS, iter_matches, normalize_level, parse_timestamp
 
 
 def main(argv=None):
@@ -23,6 +23,12 @@ def main(argv=None):
         help="可选：仅输出顶层 request_id 字段与之精确相等（区分大小写、"
              "保留首尾空白、不做子串匹配）的记录",
     )
+    parser.add_argument(
+        "--since",
+        default=None,
+        help="可选：仅输出顶层 timestamp 不早于该时刻（包含起点）的记录，"
+             "格式为 YYYY-MM-DDTHH:MM:SSZ（UTC）",
+    )
     args = parser.parse_args(argv)
 
     level = normalize_level(args.level)
@@ -39,6 +45,18 @@ def main(argv=None):
         print("参数错误：--request-id 不能为空或全为空白", file=sys.stderr)
         return 2
 
+    # 未传 --since 时为 None；传了则必须是合法的 UTC 时间字面量。
+    # 参数非法时不读取文件。
+    since = None
+    if args.since is not None:
+        since = parse_timestamp(args.since)
+        if since is None:
+            print(
+                "参数错误：--since 必须是 YYYY-MM-DDTHH:MM:SSZ 形式的 UTC 时间",
+                file=sys.stderr,
+            )
+            return 2
+
     try:
         with open(args.path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -49,7 +67,7 @@ def main(argv=None):
     # 只按 LF 拆分物理行，并去掉 CRLF 的 \r，保留行内其余字符
     lines = [line[:-1] if line.endswith("\r") else line
              for line in content.split("\n")]
-    matches, warnings = iter_matches(lines, level, request_id)
+    matches, warnings = iter_matches(lines, level, request_id, since=since)
     for lineno, message in warnings:
         print(f"第 {lineno} 行：{message}", file=sys.stderr)
     for lineno, raw in matches:
