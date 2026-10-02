@@ -1,4 +1,4 @@
-"""命令行入口：python -m log_viewer <文件路径> --level <级别>"""
+"""命令行入口：python -m log_viewer <文件路径> --level <级别> [--level <级别> ...]"""
 
 import argparse
 import sys
@@ -14,8 +14,11 @@ def main(argv=None):
     parser.add_argument("path", help="JSONL 日志文件路径（UTF-8 编码）")
     parser.add_argument(
         "--level",
+        action="append",
         required=True,
-        help="筛选级别：DEBUG、INFO、WARNING、ERROR、CRITICAL（忽略大小写及首尾空白）",
+        help="筛选级别：DEBUG、INFO、WARNING、ERROR、CRITICAL（忽略大小写及"
+             "首尾空白）；可重复提供以选择多个级别，记录满足任一所选级别"
+             "即通过（相等匹配，非严重程度阈值）",
     )
     parser.add_argument(
         "--request-id",
@@ -38,13 +41,19 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
-    level = normalize_level(args.level)
-    if level not in SUPPORTED_LEVELS:
-        print(
-            f"参数错误：--level 必须是以下级别之一：{', '.join(SUPPORTED_LEVELS)}",
-            file=sys.stderr,
-        )
-        return 2
+    # --level 可重复提供：每个值各自规范化（忽略大小写及首尾空白），任一值
+    # 为空、全空白或不受支持都判为参数错误，后续合法值不能覆盖该错误，
+    # 且所有参数校验都在读取文件之前完成。
+    levels = []
+    for raw_level in args.level:
+        level = normalize_level(raw_level)
+        if level not in SUPPORTED_LEVELS:
+            print(
+                f"参数错误：--level 必须是以下级别之一：{', '.join(SUPPORTED_LEVELS)}",
+                file=sys.stderr,
+            )
+            return 2
+        levels.append(level)
 
     # 未传 --request-id 时为 None；传了但为空字符串或全空白视为参数错误。
     request_id = args.request_id
@@ -96,7 +105,7 @@ def main(argv=None):
         part[:-1] if index < len(parts) - 1 and part.endswith("\r") else part
         for index, part in enumerate(parts)
     ]
-    matches, warnings = iter_matches(lines, level, request_id, since, until)
+    matches, warnings = iter_matches(lines, levels, request_id, since, until)
     for lineno, message in warnings:
         print(f"第 {lineno} 行：{message}", file=sys.stderr)
     for lineno, raw in matches:

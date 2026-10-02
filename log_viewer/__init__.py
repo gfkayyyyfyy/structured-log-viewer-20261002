@@ -43,16 +43,23 @@ def iter_matches(lines, level, request_id=None, since=None, until=None):
 
     lines 为已按行拆分且去掉行末换行符的字符串序列（行号从 1 开始）。
     空白行跳过；无效日志行产出警告；匹配行产出原始内容。
+    level 为字符串时按单个级别相等匹配（与旧版调用约定完全兼容）；
+    也可传入级别字符串序列（元素应为已规范化、属于 SUPPORTED_LEVELS 的值），
+    此时记录级别属于其中任一所选级别即通过：只做相等匹配，不解释为严重程度
+    阈值；重复级别不增加输出，序列顺序也不影响匹配行顺序（始终按文件行序）。
     request_id 为 None 时只按级别筛选；否则还要求顶层 request_id 字段
     是与之严格相等的字符串（区分大小写，不去除首尾空白，不做子串匹配）；
     字段缺失、为 null 或非字符串仅视为不匹配，不产生警告。
     since、until 均为 None 时不检查 timestamp；否则（datetime，UTC）
     只要给出任一时刻就启用时间检查，所有可解析为对象且 level 合法的非空记录
-    都检查顶层 timestamp：缺失、为 null、非字符串或格式非法时产出警告并跳过该行。
+    都检查顶层 timestamp（包括级别不在所选集合内的记录）：缺失、为 null、
+    非字符串或格式非法时产出警告并跳过该行。
     since 为含起点的下界（record_time >= since），until 为不含终点的上界
     （record_time < until）；合法但落在区间外的记录静默跳过。
     返回 (matches, warnings)，均为 (行号, 文本) 列表。
     """
+    # 字符串按单级别处理；其余按级别序列处理，记录命中其中任一即通过。
+    selected_levels = (level,) if isinstance(level, str) else tuple(level)
     check_time = since is not None or until is not None
     matches = []
     warnings = []
@@ -77,7 +84,7 @@ def iter_matches(lines, level, request_id=None, since=None, until=None):
             if record_time is None:
                 warnings.append((lineno, "无效日志：timestamp 缺失或格式无效"))
                 continue
-        if record_level != level:
+        if record_level not in selected_levels:
             continue
         if request_id is not None:
             value = record.get("request_id")
