@@ -43,6 +43,8 @@ def iter_matches(lines, level, request_id=None, since=None, until=None):
 
     lines 为已按行拆分且去掉行末换行符的字符串序列（行号从 1 开始）。
     空白行跳过；无效日志行产出警告；匹配行产出原始内容。
+    level 为单个级别字符串，或级别字符串的可迭代集合：记录满足任一
+    所选级别即通过（相等匹配，不解释为严重程度阈值）；重复级别不影响结果。
     request_id 为 None 时只按级别筛选；否则还要求顶层 request_id 字段
     是与之严格相等的字符串（区分大小写，不去除首尾空白，不做子串匹配）；
     字段缺失、为 null 或非字符串仅视为不匹配，不产生警告。
@@ -54,6 +56,11 @@ def iter_matches(lines, level, request_id=None, since=None, until=None):
     返回 (matches, warnings)，均为 (行号, 文本) 列表。
     """
     check_time = since is not None or until is not None
+    # 单个字符串保持既有单级别行为；可迭代集合表示任一级别匹配即可。
+    if isinstance(level, str):
+        levels = {normalize_level(level)}
+    else:
+        levels = {normalize_level(item) for item in level}
     matches = []
     warnings = []
     for lineno, raw in enumerate(lines, start=1):
@@ -77,7 +84,7 @@ def iter_matches(lines, level, request_id=None, since=None, until=None):
             if record_time is None:
                 warnings.append((lineno, "无效日志：timestamp 缺失或格式无效"))
                 continue
-        if record_level != level:
+        if record_level not in levels:
             continue
         if request_id is not None:
             value = record.get("request_id")

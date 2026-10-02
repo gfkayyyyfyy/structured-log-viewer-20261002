@@ -698,6 +698,127 @@ class UntilFilterTests(unittest.TestCase):
         )
 
 
+class MultiLevelTests(unittest.TestCase):
+    """--level 可重复：满足任一所选级别即通过，与其余条件取交集。"""
+
+    ACCEPTANCE_LINES = [
+        '{"level":"WARNING","request_id":"r-1"}',
+        '{"level":"ERROR","request_id":"r-1"}',
+        '{"level":"INFO","request_id":"r-1"}',
+        '{"level":"ERROR","request_id":"r-2"}',
+        "not-json",
+    ]
+
+    def _run(self, tmpdir, lines, *level_args, extra=()):
+        path = Path(tmpdir) / "levels.jsonl"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return run_cli(str(path), *level_args, *extra)
+
+    def test_acceptance_two_levels_with_request_id(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            proc = self._run(
+                d, self.ACCEPTANCE_LINES,
+                "--level", "ERROR", "--level", "WARNING",
+                extra=("--request-id", "r-1"),
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        # 只输出第 1、2 行；第 3 行级别不在所选内，第 4 行请求标识不符。
+        self.assertEqual(
+            proc.stdout,
+            "1\t" + self.ACCEPTANCE_LINES[0] + "\n"
+            "2\t" + self.ACCEPTANCE_LINES[1] + "\n",
+        )
+        # 标准错误仅报告第 5 行的 JSON 解析失败。
+        self.assertEqual(proc.stderr, "第 5 行：无效日志：JSON 解析失败\n")
+
+    def test_duplicate_level_adds_nothing(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            proc = self._run(
+                d, self.ACCEPTANCE_LINES,
+                "--level", "ERROR", "--level", "WARNING", "--level", " error ",
+                extra=("--request-id", "r-1"),
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout,
+            "1\t" + self.ACCEPTANCE_LINES[0] + "\n"
+            "2\t" + self.ACCEPTANCE_LINES[1] + "\n",
+        )
+        self.assertEqual(proc.stderr, "第 5 行：无效日志：JSON 解析失败\n")
+
+    def test_option_order_does_not_change_output_order(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            proc = self._run(
+                d, self.ACCEPTANCE_LINES,
+                "--level", "WARNING", "--level", "ERROR",
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        # 输出顺序仍按文件中的物理行号，与选项顺序无关。
+        self.assertEqual(
+            proc.stdout,
+            "1\t" + self.ACCEPTANCE_LINES[0] + "\n"
+            "2\t" + self.ACCEPTANCE_LINES[1] + "\n"
+            "4\t" + self.ACCEPTANCE_LINES[3] + "\n",
+        )
+
+    def test_levels_intersect_with_time_range(self):
+        import tempfile
+        lines = [
+            '{"level":"WARNING","timestamp":"2026-10-03T10:00:00Z"}',  # 1 输出
+            '{"level":"ERROR","timestamp":"2026-10-03T10:00:01Z"}',   # 2 不含终点
+            '{"level":"INFO","timestamp":null}',                      # 3 级别不符仍检查时间
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            proc = self._run(
+                d, lines,
+                "--level", "WARNING", "--level", "ERROR",
+                extra=("--since", "2026-10-03T10:00:00Z",
+                       "--until", "2026-10-03T10:00:01Z"),
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, "1\t" + lines[0] + "\n")
+        self.assertEqual(
+            proc.stderr, "第 3 行：无效日志：timestamp 缺失或格式无效\n"
+        )
+
+    def test_any_invalid_level_value_rejected_before_reading_file(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            missing = str(Path(d) / "no-such-file.jsonl")
+            for extra_levels in (
+                ("--level", ""),
+                ("--level", "   "),
+                ("--level", "trace"),
+                # 非法值在前、合法值在后也不能覆盖错误。
+                ("--level", "bogus", "--level", "ERROR"),
+            ):
+                with self.subTest(extra_levels):
+                    proc = run_cli(
+                        missing, "--level", "ERROR", *extra_levels
+                    )
+                    self.assertEqual(proc.returncode, 2)
+                    self.assertEqual(proc.stdout, "")
+                    self.assertIn("参数错误", proc.stderr)
+                    self.assertIn("--level", proc.stderr)
+                    # 不读取文件：不会报文件读取失败。
+                    self.assertNotIn("文件读取失败", proc.stderr)
+
+    def test_single_level_behavior_unchanged(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            proc = self._run(d, self.ACCEPTANCE_LINES, "--level", " error ")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout,
+            "2\t" + self.ACCEPTANCE_LINES[1] + "\n"
+            "4\t" + self.ACCEPTANCE_LINES[3] + "\n",
+        )
+        self.assertEqual(proc.stderr, "第 5 行：无效日志：JSON 解析失败\n")
+
+
 class ModuleApiTests(unittest.TestCase):
     """模块公开函数的返回约定（直接调用，不经命令行）。"""
 
@@ -725,6 +846,20 @@ class ModuleApiTests(unittest.TestCase):
         self.assertEqual(matches, [(1, lines[0])])
         # 新筛选不掩盖既有坏行警告。
         self.assertEqual(warnings, [(3, "无效日志：JSON 解析失败")])
+
+    def test_iter_matches_accepts_multiple_levels(self):
+        lines = [
+            '{"level":"WARNING"}',
+            '{"level":"ERROR"}',
+            '{"level":"INFO"}',
+        ]
+        # 可迭代集合：任一级别匹配即可；重复值与顺序不影响结果。
+        matches, warnings = iter_matches(lines, ["ERROR", "WARNING", "error"])
+        self.assertEqual(matches, [(1, lines[0]), (2, lines[1])])
+        self.assertEqual(warnings, [])
+        # 单个字符串保持既有行为。
+        matches, _ = iter_matches(lines, "ERROR")
+        self.assertEqual(matches, [(2, lines[1])])
 
     def test_parse_timestamp(self):
         from datetime import datetime
