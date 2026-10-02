@@ -55,6 +55,26 @@ def run_cli(*args):
     )
 
 
+def run_cli_raw(*args):
+    """字节模式运行 ``python -m log_viewer``，stdout/stderr 原样返回。
+
+    与 run_cli 的区别：不做文本解码，因而不做通用换行归一化——
+    正文里不紧邻 LF 的真实 CR 一旦被读取层翻译成 LF，只有比较原始字节
+    才能发现。仍固定 PYTHONIOENCODING=utf-8，使中文与 U+2028/U+2029
+    以 UTF-8 字节输出，比较时无需猜测子进程的区域编码。
+    """
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["LC_ALL"] = "C"
+    env["LANG"] = "C"
+    return subprocess.run(
+        [sys.executable, "-m", "log_viewer", *args],
+        cwd=str(PROJECT_ROOT),
+        capture_output=True,
+        env=env,
+    )
+
+
 class CoreFilteringTests(unittest.TestCase):
     """--level 筛选的主流程：匹配、警告、行号、原序。"""
 
@@ -831,6 +851,103 @@ class ModuleApiTests(unittest.TestCase):
                 (2, "无效日志：timestamp 缺失或格式无效"),
             ],
         )
+
+
+class VerbatimLineContentTests(unittest.TestCase):
+    """正文中易被误当成分行符的字符：物理行计数与原文保留回归。
+
+    真实 U+2028（行分隔符）、U+2029（段落分隔符）与不紧邻 LF 的真实 CR
+    都属于正文：不能增加物理行数，不能被替换、删除，也不能被重新编码成
+    JSON 转义。断言全部在原始字节层面进行（run_cli_raw），避免子进程
+    输出解码时的通用换行归一化把游离 CR 改写成 LF 而掩盖问题。
+    """
+
+    # 五个物理行的正文（不含行终止符）。 /  与 \r 在运行时即为
+    # 真实字符，encode("utf-8") 后写入临时文件的是真实 UTF-8 / 0x0D 字节。
+    LINE_1 = '{"level":"ERROR","message":"甲 乙 丙"}'
+    LINE_2 = "  \t"
+    LINE_3 = "not-json"
+    LINE_4 = '{"level":"INFO"}'
+    # 前置两个空格；对象结束后紧接真实 CR 与制表符，CR 不紧邻任何 LF。
+    LINE_5 = '  {"level":" error ","message":"末条"}\r\t'
+    LINES = [LINE_1, LINE_2, LINE_3, LINE_4, LINE_5]
+
+    EXPECTED_STDOUT = (
+        ("1\t" + LINE_1 + "\n" + "5\t" + LINE_5 + "\n").encode("utf-8")
+    )
+    EXPECTED_STDERR = "第 3 行：无效日志：JSON 解析失败\n".encode("utf-8")
+
+    def _run_payload(self, payload: bytes):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "case.jsonl"
+            path.write_bytes(payload)
+            return run_cli_raw(str(path), "--level", "ERROR")
+
+    def _join(self, seps, final_terminator):
+        """按给定分隔符拼接五行；seps 为四个行间隔，末行另加终止符。"""
+        self.assertEqual(len(seps), len(self.LINES) - 1)
+        parts = []
+        for index, line in enumerate(self.LINES):
+            parts.append(line)
+            if index < len(seps):
+                parts.append(seps[index])
+        if final_terminator is not None:
+            parts.append(final_terminator)
+        return "".join(parts).encode("utf-8")
+
+    def test_special_chars_are_body_under_all_separator_shapes(self):
+        payloads = {
+            "LF，末行有换行": self._join(("\n",) * 4, "\n"),
+            "LF，末行无换行": self._join(("\n",) * 4, None),
+            "CRLF，末行有换行": self._join(("\r\n",) * 4, "\r\n"),
+            "CRLF，末行无换行": self._join(("\r\n",) * 4, None),
+            # 混合分隔：CRLF 与 LF 交错出现；末行终止符单独取 LF。
+            "混合分隔，末行有换行": self._join(
+                ("\n", "\r\n", "\r\n", "\n"), "\n"
+            ),
+            "混合分隔，末行无换行": self._join(
+                ("\n", "\r\n", "\r\n", "\n"), None
+            ),
+        }
+        for label, payload in payloads.items():
+            with self.subTest(label):
+                proc = self._run_payload(payload)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                # 只输出第 1、5 行，行号、制表符与原文保持不变，顺序不变。
+                self.assertEqual(proc.stdout, self.EXPECTED_STDOUT)
+                # 只有第 3 行一条警告，物理行总数仍为 5。
+                self.assertEqual(proc.stderr, self.EXPECTED_STDERR)
+
+    def test_special_chars_remain_literal_not_reencoded(self):
+        # 以最容易暴露问题的“末行无换行 + LF 分隔”形态做定点检查。
+        proc = self._run_payload(self._join(("\n",) * 4, None))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        stdout = proc.stdout
+        # U+2028/U+2029 以真实 UTF-8 字节（E2 80 A8 / E2 80 A9）原样保留，
+        # 没有被转义成字面量   /  。
+        self.assertIn(" ".encode("utf-8"), stdout)
+        self.assertIn(" ".encode("utf-8"), stdout)
+        self.assertNotIn(b"\\u2028", stdout)
+        self.assertNotIn(b"\\u2029", stdout)
+        # 第五行对象后的真实 CR 与制表符原样保留，且 CR 后紧跟输出自身的 LF，
+        # 但它属于正文，不能像 CRLF 分隔符那样被剥掉。
+        self.assertTrue(stdout.endswith("末条".encode("utf-8") + b'"}\r\t\n'))
+        self.assertNotIn(b"\r\n\r\t\n", stdout)
+
+    def test_lone_trailing_cr_without_lf_is_verbatim(self):
+        # 仅一条记录，末尾真实 CR 且没有 LF：该 CR 不是分隔符，原样输出。
+        proc = self._run_payload(b'{"level":"ERROR"}\r')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, b'1\t{"level":"ERROR"}\r\n')
+        self.assertEqual(proc.stderr, b"")
+
+    def test_cr_before_lf_is_removed_only_as_crlf_separator(self):
+        # 同一内容改为 CRLF 终止：仅剥掉作为分隔符的那个 CR，正文不含 CR。
+        proc = self._run_payload(b'{"level":"ERROR"}\r\n')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, b'1\t{"level":"ERROR"}\n')
+        self.assertEqual(proc.stderr, b"")
 
 
 if __name__ == "__main__":
