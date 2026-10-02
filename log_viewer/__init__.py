@@ -12,11 +12,13 @@ def normalize_level(value):
     return value.strip().upper()
 
 
-def iter_matches(lines, level):
+def iter_matches(lines, level, request_id=None):
     """遍历物理行，产出 (行号, 原始行, 警告)。
 
     lines 为已按行拆分且去掉行末换行符的字符串序列（行号从 1 开始）。
     空白行跳过；无效日志行产出警告；匹配行产出原始内容。
+    request_id 为 None 时仅按级别筛选；否则还要求记录顶层 request_id
+    字段与其精确相等（区分大小写，不去除首尾空白）。
     返回 (matches, warnings)，均为 (行号, 文本) 列表。
     """
     matches = []
@@ -36,6 +38,8 @@ def iter_matches(lines, level):
         if record_level not in SUPPORTED_LEVELS:
             warnings.append((lineno, "无效日志：level 缺失或不属于支持的级别"))
             continue
-        if record_level == level:
+        if record_level == level and (
+            request_id is None or record.get("request_id") == request_id
+        ):
             matches.append((lineno, raw))
     return matches, warnings

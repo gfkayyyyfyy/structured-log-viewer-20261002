@@ -1,0 +1,6 @@
+{"level":"INFO","request_id":"r-1"}
+{"level":"ERROR","request_id":"r-2"}
+{"level":"ERROR","request_id":"r-1"}
+not-json
+{"level":"ERROR"}
+{"level":" error ","request_id":"r-1"}

@@ -17,7 +17,16 @@ def main(argv=None):
         required=True,
         help="筛选级别：DEBUG、INFO、WARNING、ERROR、CRITICAL（忽略大小写及首尾空白）",
     )
+    parser.add_argument(
+        "--request-id",
+        default=None,
+        help="可选：仅输出顶层 request_id 字段与该值精确相等的记录（区分大小写）",
+    )
     args = parser.parse_args(argv)
+
+    if args.request_id is not None and not args.request_id.strip():
+        print("参数错误：--request-id 不能为空或全为空白", file=sys.stderr)
+        return 2
 
     level = normalize_level(args.level)
     if level not in SUPPORTED_LEVELS:
@@ -37,7 +46,7 @@ def main(argv=None):
     # 只按 LF 拆分物理行，并去掉 CRLF 的 \r，保留行内其余字符
     lines = [line[:-1] if line.endswith("\r") else line
              for line in content.split("\n")]
-    matches, warnings = iter_matches(lines, level)
+    matches, warnings = iter_matches(lines, level, request_id=args.request_id)
     for lineno, message in warnings:
         print(f"第 {lineno} 行：{message}", file=sys.stderr)
     for lineno, raw in matches:
