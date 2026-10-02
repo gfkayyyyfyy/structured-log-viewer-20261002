@@ -1,8 +1,32 @@
 """本地 JSONL 日志查看器：按级别筛选并输出匹配的原始行。"""
 
 import json
+import re
+from datetime import datetime
 
 SUPPORTED_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+# 严格的 UTC 时间戳：YYYY-MM-DDTHH:MM:SSZ。
+# 不接受小数秒、时区偏移、小写分隔字母或首尾空白。
+TIMESTAMP_PATTERN = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})Z$"
+)
+
+
+def parse_timestamp(value):
+    """解析严格的 UTC 时间戳 YYYY-MM-DDTHH:MM:SSZ，返回 datetime；非法时返回 None。
+
+    年份为四位且非零，其余数字部分为两位，日期与时分秒须有效（不含闰秒）。
+    """
+    if not isinstance(value, str):
+        return None
+    match = TIMESTAMP_PATTERN.match(value)
+    if not match:
+        return None
+    try:
+        return datetime(*[int(part) for part in match.groups()])
+    except ValueError:
+        return None
 
 
 def normalize_level(value):
@@ -12,7 +36,7 @@ def normalize_level(value):
     return value.strip().upper()
 
 
-def iter_matches(lines, level, request_id=None):
+def iter_matches(lines, level, request_id=None, since=None):
     """遍历物理行，产出 (行号, 原始行, 警告)。
 
     lines 为已按行拆分且去掉行末换行符的字符串序列（行号从 1 开始）。
@@ -20,6 +44,10 @@ def iter_matches(lines, level, request_id=None):
     request_id 为 None 时只按级别筛选；否则还要求顶层 request_id 字段
     是与之严格相等的字符串（区分大小写，不去除首尾空白，不做子串匹配）；
     字段缺失、为 null 或非字符串仅视为不匹配，不产生警告。
+    since 为 None 时不检查 timestamp；否则（datetime，UTC 起点，含起点）
+    所有可解析为对象且 level 合法的非空记录都检查顶层 timestamp：
+    缺失、为 null、非字符串或格式非法时产出警告并跳过该行；
+    合法但早于 since 的记录静默跳过。
     返回 (matches, warnings)，均为 (行号, 文本) 列表。
     """
     matches = []
@@ -39,11 +67,19 @@ def iter_matches(lines, level, request_id=None):
         if record_level not in SUPPORTED_LEVELS:
             warnings.append((lineno, "无效日志：level 缺失或不属于支持的级别"))
             continue
+        record_time = None
+        if since is not None:
+            record_time = parse_timestamp(record.get("timestamp"))
+            if record_time is None:
+                warnings.append((lineno, "无效日志：timestamp 缺失或格式无效"))
+                continue
         if record_level != level:
             continue
         if request_id is not None:
             value = record.get("request_id")
             if not isinstance(value, str) or value != request_id:
                 continue
+        if since is not None and record_time < since:
+            continue
         matches.append((lineno, raw))
     return matches, warnings
