@@ -234,6 +234,111 @@ class FileReadErrorTests(unittest.TestCase):
         self.assertIn("文件读取失败", proc.stderr)
 
 
+class RequestIdFilterTests(unittest.TestCase):
+    """可选 --request-id：级别与请求标识同时满足才输出，坏行警告不受影响。"""
+
+    def _run(self, tmpdir, lines, *extra):
+        path = Path(tmpdir) / "requests.jsonl"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return run_cli(str(path), "--level", "ERROR", *extra)
+
+    def test_level_and_request_id_must_both_match(self):
+        import tempfile
+        lines = [
+            '{"level":"INFO","request_id":"r-1"}',
+            '{"level":"ERROR","request_id":"r-2"}',
+            '{"level":"ERROR","request_id":"r-1"}',
+            "not-json",
+            '{"level":"ERROR"}',
+            '{"level":" error ","request_id":"r-1"}',
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            proc = self._run(d, lines, "--request-id", "r-1")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout,
+            "3\t" + lines[2] + "\n"
+            "6\t" + lines[5] + "\n",
+        )
+        # JSON 损坏、缺 request_id 的行不产生额外警告；既有坏行警告保留行号。
+        self.assertEqual(proc.stderr, "第 4 行：无效日志：JSON 解析失败\n")
+
+    def test_without_request_id_keeps_level_only_results(self):
+        import tempfile
+        lines = [
+            '{"level":"INFO","request_id":"r-1"}',
+            '{"level":"ERROR","request_id":"r-2"}',
+            '{"level":"ERROR","request_id":"r-1"}',
+            "not-json",
+            '{"level":"ERROR"}',
+            '{"level":" error ","request_id":"r-1"}',
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            proc = self._run(d, lines)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout,
+            "2\t" + lines[1] + "\n"
+            "3\t" + lines[2] + "\n"
+            "5\t" + lines[4] + "\n"
+            "6\t" + lines[5] + "\n",
+        )
+        self.assertEqual(proc.stderr, "第 4 行：无效日志：JSON 解析失败\n")
+
+    def test_exact_string_semantics(self):
+        import tempfile
+        # 大小写不同、首尾空白不同、子串、null、非字符串、缺失、同值在别的字段。
+        lines = [
+            '{"level":"ERROR","request_id":"R-1"}',
+            '{"level":"ERROR","request_id":" r-1"}',
+            '{"level":"ERROR","request_id":"r-12"}',
+            '{"level":"ERROR","request_id":null}',
+            '{"level":"ERROR","request_id":42}',
+            '{"level":"ERROR"}',
+            '{"level":"ERROR","other":"r-1"}',
+            '{"level":"ERROR","request_id":"r-1"}',
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            proc = self._run(d, lines, "--request-id", "r-1")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, "8\t" + lines[7] + "\n")
+        # 不匹配的记录一律静默，不产生警告。
+        self.assertEqual(proc.stderr, "")
+
+    def test_whitespace_value_matched_exactly(self):
+        import tempfile
+        lines = [
+            '{"level":"ERROR","request_id":" x "}',
+            '{"level":"ERROR","request_id":"x"}',
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            proc = self._run(d, lines, "--request-id", " x ")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, "1\t" + lines[0] + "\n")
+
+    def test_missing_request_id_value(self):
+        import tempfile
+        lines = ['{"level":"ERROR","request_id":"r-1"}']
+        with tempfile.TemporaryDirectory() as d:
+            proc = self._run(d, lines, "--request-id")
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stdout, "")
+        # argparse 错误说明中包含选项名 --request-id。
+        self.assertIn("--request-id", proc.stderr)
+
+    def test_empty_or_blank_request_id_value(self):
+        import tempfile
+        lines = ['{"level":"ERROR","request_id":"r-1"}']
+        for value in ("", "   ", "\t"):
+            with self.subTest(repr(value)):
+                with tempfile.TemporaryDirectory() as d:
+                    proc = self._run(d, lines, "--request-id", value)
+                self.assertEqual(proc.returncode, 2)
+                self.assertEqual(proc.stdout, "")
+                self.assertIn("参数错误", proc.stderr)
+                self.assertIn("--request-id", proc.stderr)
+
+
 class ModuleApiTests(unittest.TestCase):
     """模块公开函数的返回约定（直接调用，不经命令行）。"""
 
@@ -245,6 +350,21 @@ class ModuleApiTests(unittest.TestCase):
     def test_iter_matches_returns_lineno_text_pairs(self):
         matches, warnings = iter_matches(CORE_LINES, "ERROR")
         self.assertEqual(matches, [(4, CORE_LINES[3]), (5, CORE_LINES[4])])
+        self.assertEqual(warnings, [(3, "无效日志：JSON 解析失败")])
+
+    def test_iter_matches_request_id_filter(self):
+        lines = [
+            '{"level":"ERROR","request_id":"a"}',
+            '{"level":"ERROR","request_id":"b"}',
+            "not-json",
+            '{"level":"ERROR","request_id":null}',
+        ]
+        # 未传 request_id 时行为不变；传入时额外按精确字符串筛选。
+        matches, _ = iter_matches(lines, "ERROR")
+        self.assertEqual([lineno for lineno, _ in matches], [1, 2, 4])
+        matches, warnings = iter_matches(lines, "ERROR", "a")
+        self.assertEqual(matches, [(1, lines[0])])
+        # 新筛选不掩盖既有坏行警告。
         self.assertEqual(warnings, [(3, "无效日志：JSON 解析失败")])
 
 
