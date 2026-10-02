@@ -29,6 +29,13 @@ def main(argv=None):
         help="可选：仅输出顶层 timestamp 不早于该时刻的记录，"
              "格式为 YYYY-MM-DDTHH:MM:SSZ（UTC，含起点）",
     )
+    parser.add_argument(
+        "--until",
+        default=None,
+        help="可选：仅输出顶层 timestamp 严格早于该时刻的记录，"
+             "格式为 YYYY-MM-DDTHH:MM:SSZ（UTC，不含终点）；"
+             "与 --since 同时给出时为含起点、不含终点的区间",
+    )
     args = parser.parse_args(argv)
 
     level = normalize_level(args.level)
@@ -56,6 +63,22 @@ def main(argv=None):
             )
             return 2
 
+    # 未传 --until 时为 None；传了但为空或格式非法视为参数错误，不读取文件。
+    until = None
+    if args.until is not None:
+        until = parse_timestamp(args.until)
+        if until is None:
+            print(
+                "参数错误：--until 必须是 YYYY-MM-DDTHH:MM:SSZ 格式的 UTC 时间",
+                file=sys.stderr,
+            )
+            return 2
+
+    # 起点严格晚于终点为参数错误；起止相等是合法的空区间。
+    if since is not None and until is not None and since > until:
+        print("参数错误：--since 不能晚于 --until", file=sys.stderr)
+        return 2
+
     try:
         with open(args.path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -66,7 +89,7 @@ def main(argv=None):
     # 只按 LF 拆分物理行，并去掉 CRLF 的 \r，保留行内其余字符
     lines = [line[:-1] if line.endswith("\r") else line
              for line in content.split("\n")]
-    matches, warnings = iter_matches(lines, level, request_id, since)
+    matches, warnings = iter_matches(lines, level, request_id, since, until)
     for lineno, message in warnings:
         print(f"第 {lineno} 行：{message}", file=sys.stderr)
     for lineno, raw in matches:

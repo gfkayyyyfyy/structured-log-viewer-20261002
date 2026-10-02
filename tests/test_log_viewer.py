@@ -509,6 +509,195 @@ class SinceFilterTests(unittest.TestCase):
         self.assertIn("--since", proc.stderr)
 
 
+class UntilFilterTests(unittest.TestCase):
+    """可选 --until：严格早于终点；与 --since 组成含起点不含终点的区间。"""
+
+    UNTIL_LINES = [
+        '{"level":"ERROR","request_id":"r-1","timestamp":"2026-10-03T09:59:59Z"}',
+        '{"level":"ERROR","request_id":"r-1","timestamp":"2026-10-03T10:00:00Z"}',
+        '{"level":"ERROR","request_id":"r-1","timestamp":"2026-10-03T10:00:01Z"}',
+        '{"level":"ERROR","request_id":"r-1"}',
+    ]
+
+    def _write_payload(self, tmpdir, lines, newline="\n", final=True):
+        path = Path(tmpdir) / "case.jsonl"
+        payload = newline.join(lines)
+        if final:
+            payload += newline
+        path.write_bytes(payload.encode("utf-8"))
+        return str(path)
+
+    def _run(self, tmpdir, lines, *extra):
+        return run_cli(
+            self._write_payload(tmpdir, lines),
+            "--level", "ERROR", *extra,
+        )
+
+    def test_acceptance_since_until_request_id_half_open_interval(self):
+        import tempfile
+        payloads = {
+            "LF，末行有换行": (
+                "\n".join(self.UNTIL_LINES) + "\n"
+            ).encode("utf-8"),
+            "CRLF": (
+                "\r\n".join(self.UNTIL_LINES) + "\r\n"
+            ).encode("utf-8"),
+            "末行无换行符": "\n".join(self.UNTIL_LINES).encode("utf-8"),
+        }
+        with tempfile.TemporaryDirectory() as d:
+            for index, (label, payload) in enumerate(payloads.items()):
+                with self.subTest(label):
+                    path = Path(d) / f"case-{index}.jsonl"
+                    path.write_bytes(payload)
+                    proc = run_cli(
+                        str(path), "--level", "ERROR", "--request-id", "r-1",
+                        "--since", "2026-10-03T10:00:00Z",
+                        "--until", "2026-10-03T10:00:01Z",
+                    )
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                    # 含起点、不含终点：只输出第 2 行原文。
+                    self.assertEqual(
+                        proc.stdout, "2\t" + self.UNTIL_LINES[1] + "\n"
+                    )
+                    # 第 4 行缺 timestamp，仅一条带原始行号的警告。
+                    self.assertEqual(
+                        proc.stderr,
+                        "第 4 行：无效日志：timestamp 缺失或格式无效\n",
+                    )
+
+    def test_acceptance_until_only_outputs_first_two_lines(self):
+        import tempfile
+        # 撤掉起点：严格早于 10:00:01 的第 1、2 行输出，警告不变。
+        with tempfile.TemporaryDirectory() as d:
+            proc = self._run(
+                d, self.UNTIL_LINES, "--request-id", "r-1",
+                "--until", "2026-10-03T10:00:01Z",
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout,
+            "1\t" + self.UNTIL_LINES[0] + "\n"
+            "2\t" + self.UNTIL_LINES[1] + "\n",
+        )
+        self.assertEqual(
+            proc.stderr, "第 4 行：无效日志：timestamp 缺失或格式无效\n"
+        )
+
+    def test_timestamp_checked_even_when_level_or_request_id_mismatch(self):
+        import tempfile
+        lines = [
+            '{"level":"INFO","timestamp":null}',                    # 1 级别不匹配仍检查
+            '{"level":"ERROR","request_id":"x","timestamp":"bad"}',  # 2 请求标识不匹配仍检查
+            "not-json",                                              # 3 只有原有警告
+            '["level","ERROR"]',                                     # 4 只有原有警告
+            '{"level":"VERBOSE","timestamp":null}',                  # 5 只有原有警告
+            '{"level":"ERROR","timestamp":"2026-10-03T10:00:01Z"}',  # 6 不早于终点静默跳过
+            '{"level":"ERROR","request_id":"y","timestamp":"2026-10-03T10:00:00Z"}',  # 7 输出
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            proc = self._run(
+                d, lines, "--request-id", "y",
+                "--until", "2026-10-03T10:00:01Z",
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, "7\t" + lines[6] + "\n")
+        self.assertEqual(
+            proc.stderr,
+            "第 1 行：无效日志：timestamp 缺失或格式无效\n"
+            "第 2 行：无效日志：timestamp 缺失或格式无效\n"
+            "第 3 行：无效日志：JSON 解析失败\n"
+            "第 4 行：无效日志：顶层不是 JSON 对象\n"
+            "第 5 行：无效日志：level 缺失或不属于支持的级别\n",
+        )
+
+    def test_equal_since_and_until_is_empty_interval_but_still_validates(self):
+        import tempfile
+        lines = [
+            '{"level":"ERROR","request_id":"r-1","timestamp":"2026-10-03T10:00:00Z"}',
+            '{"level":"ERROR","request_id":"r-1"}',
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            proc = self._run(
+                d, lines, "--request-id", "r-1",
+                "--since", "2026-10-03T10:00:00Z",
+                "--until", "2026-10-03T10:00:00Z",
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        # 空区间：恰在终点的记录因不含终点而不输出。
+        self.assertEqual(proc.stdout, "")
+        # 无效记录仍检查并警告。
+        self.assertEqual(
+            proc.stderr, "第 2 行：无效日志：timestamp 缺失或格式无效\n"
+        )
+
+    def test_invalid_until_value_rejected_before_reading_file(self):
+        import tempfile
+        bad_values = [
+            "", "   ", "2026-10-03", "2026-10-03T10:00:00",
+            "2026-10-03t10:00:00Z", "2026-10-03T10:00:00.5Z",
+            "2026-10-03T10:00:00+00:00", "2026-10-03T10:00:60Z",
+            "0000-01-01T00:00:00Z", "2026-02-30T00:00:00Z",
+            "2026-10-03T24:00:00Z", " 2026-10-03T10:00:00Z",
+            "2026-10-03T10:00:00Z\n",
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            missing = str(Path(d) / "no-such-file.jsonl")
+            for value in bad_values:
+                with self.subTest(repr(value)):
+                    proc = run_cli(
+                        missing, "--level", "ERROR", "--until", value
+                    )
+                    self.assertEqual(proc.returncode, 2)
+                    self.assertEqual(proc.stdout, "")
+                    self.assertIn("参数错误", proc.stderr)
+                    self.assertIn("--until", proc.stderr)
+                    # 不读取文件：不会报文件读取失败。
+                    self.assertNotIn("文件读取失败", proc.stderr)
+
+    def test_missing_until_value(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            proc = self._run(d, self.UNTIL_LINES, "--until")
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stdout, "")
+        # argparse 错误说明中包含选项名 --until。
+        self.assertIn("--until", proc.stderr)
+
+    def test_since_later_than_until_rejected_before_reading_file(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            missing = str(Path(d) / "no-such-file.jsonl")
+            proc = run_cli(
+                missing, "--level", "ERROR",
+                "--since", "2026-10-03T10:00:01Z",
+                "--until", "2026-10-03T10:00:00Z",
+            )
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stdout, "")
+        self.assertIn("参数错误", proc.stderr)
+        self.assertIn("--since", proc.stderr)
+        self.assertIn("--until", proc.stderr)
+        self.assertNotIn("文件读取失败", proc.stderr)
+
+    def test_without_until_behavior_unchanged(self):
+        import tempfile
+        # 不传 --until 时 --since 仍为含起点的无界区间：第 2、3 行输出。
+        with tempfile.TemporaryDirectory() as d:
+            proc = self._run(
+                d, self.UNTIL_LINES, "--request-id", "r-1",
+                "--since", "2026-10-03T10:00:00Z",
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout,
+            "2\t" + self.UNTIL_LINES[1] + "\n"
+            "3\t" + self.UNTIL_LINES[2] + "\n",
+        )
+        self.assertEqual(
+            proc.stderr, "第 4 行：无效日志：timestamp 缺失或格式无效\n"
+        )
+
+
 class ModuleApiTests(unittest.TestCase):
     """模块公开函数的返回约定（直接调用，不经命令行）。"""
 
@@ -587,6 +776,60 @@ class ModuleApiTests(unittest.TestCase):
         self.assertEqual(matches, [(2, lines[1]), (3, lines[2])])
         self.assertEqual(
             warnings, [(4, "无效日志：timestamp 缺失或格式无效")]
+        )
+
+    def test_iter_matches_until_filter(self):
+        until = parse_timestamp("2026-10-03T10:00:01Z")
+        lines = [
+            '{"level":"ERROR","request_id":"r-1","timestamp":"2026-10-03T09:59:59Z"}',
+            '{"level":"ERROR","request_id":"r-1","timestamp":"2026-10-03T10:00:00Z"}',
+            '{"level":"ERROR","request_id":"r-1","timestamp":"2026-10-03T10:00:01Z"}',
+            '{"level":"ERROR","request_id":"r-1"}',
+        ]
+        # 只给 until：严格早于终点的第 1、2 行输出，第 4 行时间戳警告。
+        matches, warnings = iter_matches(
+            lines, "ERROR", "r-1", None, until
+        )
+        self.assertEqual(matches, [(1, lines[0]), (2, lines[1])])
+        self.assertEqual(
+            warnings, [(4, "无效日志：timestamp 缺失或格式无效")]
+        )
+        # since + until：含起点、不含终点的区间只含第 2 行。
+        since = parse_timestamp("2026-10-03T10:00:00Z")
+        matches, warnings = iter_matches(
+            lines, "ERROR", "r-1", since, until
+        )
+        self.assertEqual(matches, [(2, lines[1])])
+        self.assertEqual(
+            warnings, [(4, "无效日志：timestamp 缺失或格式无效")]
+        )
+        # 起止相等为合法空区间：恰在终点的记录不输出，但仍检查无效记录。
+        matches, warnings = iter_matches(
+            lines, "ERROR", "r-1", until, until
+        )
+        self.assertEqual(matches, [])
+        self.assertEqual(
+            warnings, [(4, "无效日志：timestamp 缺失或格式无效")]
+        )
+
+    def test_iter_matches_until_checks_timestamp_on_nonmatching_records(self):
+        until = parse_timestamp("2026-10-03T10:00:01Z")
+        lines = [
+            '{"level":"INFO","timestamp":null}',
+            '{"level":"ERROR","request_id":"x","timestamp":"bad"}',
+            '{"level":"ERROR","request_id":"y","timestamp":"2026-10-03T10:00:00Z"}',
+        ]
+        # 只给 until 也启用检查：级别或请求标识不匹配的行仍产生时间戳警告。
+        matches, warnings = iter_matches(
+            lines, "ERROR", "y", None, until
+        )
+        self.assertEqual(matches, [(3, lines[2])])
+        self.assertEqual(
+            warnings,
+            [
+                (1, "无效日志：timestamp 缺失或格式无效"),
+                (2, "无效日志：timestamp 缺失或格式无效"),
+            ],
         )
 
 
