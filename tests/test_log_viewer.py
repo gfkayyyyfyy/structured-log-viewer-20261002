@@ -436,6 +436,44 @@ class SinceFilterTests(unittest.TestCase):
             ),
         )
 
+    def test_trailing_real_lf_in_timestamp_is_rejected(self):
+        import tempfile
+        # JSON 文本中的 \n 是转义，解码后为 timestamp 末尾的真实 LF：
+        # 该值曾被正则的 $ 当作合法时间放过。
+        line_bad = '{"level":"ERROR","timestamp":"2026-10-03T10:00:00Z\\n"}'
+        line_ok = '{"level":"ERROR","timestamp":"2026-10-03T10:00:00Z"}'
+        # LF 与 CRLF 物理换行都要覆盖：行内的转义 LF 不应影响物理行拆分。
+        payloads = {
+            "LF": ("\n".join([line_bad, line_ok]) + "\n").encode("utf-8"),
+            "CRLF": ("\r\n".join([line_bad, line_ok]) + "\r\n").encode("utf-8"),
+        }
+        with tempfile.TemporaryDirectory() as d:
+            for label, payload in payloads.items():
+                path = Path(d) / f"case-{label}.jsonl"
+                path.write_bytes(payload)
+                with self.subTest(f"{label}，启用 --since"):
+                    proc = run_cli(
+                        str(path), "--level", "ERROR",
+                        "--since", "2026-10-03T10:00:00Z",
+                    )
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                    # 仅第二行按既有格式输出；警告仅指向第一行。
+                    self.assertEqual(proc.stdout, "2\t" + line_ok + "\n")
+                    self.assertEqual(
+                        proc.stderr,
+                        "第 1 行：无效日志：timestamp 缺失或格式无效\n",
+                    )
+                with self.subTest(f"{label}，不传 --since"):
+                    proc = run_cli(str(path), "--level", "ERROR")
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                    # 不启用时间筛选时两行都输出，且没有时间警告。
+                    self.assertEqual(
+                        proc.stdout,
+                        "1\t" + line_bad + "\n"
+                        "2\t" + line_ok + "\n",
+                    )
+                    self.assertEqual(proc.stderr, "")
+
     def test_invalid_since_value_rejected_before_reading_file(self):
         import tempfile
         bad_values = [
@@ -444,6 +482,8 @@ class SinceFilterTests(unittest.TestCase):
             "2026-10-03T10:00:00+00:00", "2026-10-03T10:00:60Z",
             "0000-01-01T00:00:00Z", "2026-02-30T00:00:00Z",
             "2026-10-03T24:00:00Z", " 2026-10-03T10:00:00Z",
+            # 末尾真实 LF（shell 中以 $'...' 形式传入）也必须在读取文件前拒绝。
+            "2026-10-03T10:00:00Z\n",
         ]
         with tempfile.TemporaryDirectory() as d:
             missing = str(Path(d) / "no-such-file.jsonl")
@@ -509,9 +549,26 @@ class ModuleApiTests(unittest.TestCase):
             "2026-10-03t10:00:00Z", "2026-10-03T10:00:60Z",
             "0000-01-01T00:00:00Z", "2026-02-30T00:00:00Z",
             " 2026-10-03T10:00:00Z",
+            # 末尾单个真实 LF 曾被正则的 $ 放过：$ 允许在结尾换行之前匹配。
+            "2026-10-03T10:00:00Z\n",
+            "\n2026-10-03T10:00:00Z",
+            "2026-10-03T10:00:00Z\r",
         ):
             with self.subTest(repr(bad)):
                 self.assertIsNone(parse_timestamp(bad))
+
+    def test_iter_matches_trailing_lf_timestamp_warns_even_if_level_mismatch(self):
+        since = parse_timestamp("2026-10-03T10:00:00Z")
+        lines = [
+            # timestamp 末尾的真实 LF 是格式非法；级别不匹配也照常警告。
+            '{"level":"INFO","timestamp":"2026-10-03T10:00:00Z\\n"}',
+            '{"level":"ERROR","timestamp":"2026-10-03T10:00:00Z"}',
+        ]
+        matches, warnings = iter_matches(lines, "ERROR", None, since)
+        self.assertEqual(matches, [(2, lines[1])])
+        self.assertEqual(
+            warnings, [(1, "无效日志：timestamp 缺失或格式无效")]
+        )
 
     def test_iter_matches_since_filter(self):
         since = parse_timestamp("2026-10-03T10:00:00Z")
