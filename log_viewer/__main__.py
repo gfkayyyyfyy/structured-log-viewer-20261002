@@ -80,15 +80,25 @@ def main(argv=None):
         return 2
 
     try:
-        with open(args.path, "r", encoding="utf-8") as f:
+        # newline="" 关闭通用换行翻译：单独 CR 是行内内容，不能被改成 LF。
+        with open(args.path, "r", encoding="utf-8", newline="") as f:
             content = f.read()
     except (OSError, UnicodeDecodeError) as exc:
         print(f"文件读取失败：{args.path}（{exc}）", file=sys.stderr)
         return 2
 
-    # 只按 LF 拆分物理行，并去掉 CRLF 的 \r，保留行内其余字符
-    lines = [line[:-1] if line.endswith("\r") else line
-             for line in content.split("\n")]
+    # 只按 LF 拆分物理行：LF 与 CRLF 是行终止符，不紧邻 LF 的 CR 属于行内内容。
+    parts = content.split("\n")
+    # 文件以 LF 结束时，split 末尾多出的空串不是真实物理行。
+    if content.endswith("\n"):
+        parts.pop()
+    lines = []
+    for index, part in enumerate(parts):
+        # 仅当被 LF 终止时，紧邻 LF 的 CR 才是 CRLF 终止符的一部分，予以移除；
+        # 末行没有终止符，结尾的单独 CR 保留。
+        if index < len(parts) - 1 and part.endswith("\r"):
+            part = part[:-1]
+        lines.append(part)
     matches, warnings = iter_matches(lines, level, request_id, since, until)
     for lineno, message in warnings:
         print(f"第 {lineno} 行：{message}", file=sys.stderr)
