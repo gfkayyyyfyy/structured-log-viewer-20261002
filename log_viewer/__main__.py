@@ -79,16 +79,23 @@ def main(argv=None):
         print("参数错误：--since 不能晚于 --until", file=sys.stderr)
         return 2
 
+    # newline="" 关闭通用换行转换：不紧邻 LF 的单独 CR 必须原样保留，
+    # 不能在读取时被翻译成 LF 而拆开物理行。
     try:
-        with open(args.path, "r", encoding="utf-8") as f:
+        with open(args.path, "r", encoding="utf-8", newline="") as f:
             content = f.read()
     except (OSError, UnicodeDecodeError) as exc:
         print(f"文件读取失败：{args.path}（{exc}）", file=sys.stderr)
         return 2
 
-    # 只按 LF 拆分物理行，并去掉 CRLF 的 \r，保留行内其余字符
-    lines = [line[:-1] if line.endswith("\r") else line
-             for line in content.split("\n")]
+    # 物理行只由 LF（LF 或 CRLF）终止：按 LF 拆分后，仅对被 LF 终止的
+    # 分段（除最后一个外）去掉 CRLF 中紧邻 LF 的那个 CR。
+    # 最后一个分段没有终止 LF：即使以 CR 结尾也原样保留（末行结尾的单独 CR）。
+    parts = content.split("\n")
+    lines = [
+        part[:-1] if index < len(parts) - 1 and part.endswith("\r") else part
+        for index, part in enumerate(parts)
+    ]
     matches, warnings = iter_matches(lines, level, request_id, since, until)
     for lineno, message in warnings:
         print(f"第 {lineno} 行：{message}", file=sys.stderr)
