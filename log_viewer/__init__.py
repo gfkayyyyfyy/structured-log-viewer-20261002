@@ -9,7 +9,7 @@ SUPPORTED_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 # 严格的 UTC 时间戳：YYYY-MM-DDTHH:MM:SSZ。
 # 不接受小数秒、时区偏移、小写分隔字母或首尾空白。
 TIMESTAMP_PATTERN = re.compile(
-    r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})Z$"
+    r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})Z\Z"
 )
 
 
