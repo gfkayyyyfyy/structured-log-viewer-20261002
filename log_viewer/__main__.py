@@ -46,7 +46,19 @@ def main(argv=None):
         help="可选：不输出匹配行，只向标准输出写一个 JSON 统计摘要，"
              "包含 matched_count、invalid_count、by_level 三个字段",
     )
+    parser.add_argument(
+        "--jsonl",
+        action="store_true",
+        help="可选：将匹配记录以 JSONL 写到标准输出，每条记录只输出"
+             "原始正文和末尾换行，不带行号与制表符前缀，不加外层数组或"
+             "统计字段，正文不重新序列化；不能与 --summary 同时使用",
+    )
     args = parser.parse_args(argv)
+
+    # 两种输出模式互斥：在读取文件之前拒绝，标准输出保持为空。
+    if args.jsonl and args.summary:
+        print("参数错误：--jsonl 与 --summary 不能同时使用", file=sys.stderr)
+        return 2
 
     # --level 可重复提供：每个值各自规范化（忽略大小写及首尾空白），任一值
     # 为空、全空白或不受支持都判为参数错误，后续合法值不能覆盖该错误，
@@ -128,6 +140,18 @@ def main(argv=None):
             "by_level": by_level,
         }
         print(json.dumps(summary, ensure_ascii=False))
+    elif args.jsonl:
+        # JSONL 导出模式：每条匹配记录只写原始正文和一个 LF 终止符，
+        # 不带行号和制表符前缀，不加外层数组或统计字段。
+        # 直接写字节：正文不重新序列化，首尾空白、字段顺序、中文、
+        # JSON 转义以及正文中的单独 CR、U+2028/U+2029 均原样保留；
+        # 末行即使源文件没有终止 LF 也补一个 LF，使重定向得到的
+        # 文件每行（含最后一条）都以换行结束。
+        stdout_buffer = sys.stdout.buffer
+        for _, raw in matches:
+            stdout_buffer.write(raw.encode("utf-8"))
+            stdout_buffer.write(b"\n")
+        stdout_buffer.flush()
     else:
         for lineno, raw in matches:
             print(f"{lineno}\t{raw}")
