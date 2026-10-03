@@ -1,6 +1,7 @@
 """命令行入口：python -m log_viewer <文件路径> --level <级别> [--level <级别> ...]"""
 
 import argparse
+import json
 import sys
 
 from . import SUPPORTED_LEVELS, iter_matches, normalize_level, parse_timestamp
@@ -38,6 +39,12 @@ def main(argv=None):
         help="可选：仅输出顶层 timestamp 严格早于该时刻的记录，"
              "格式为 YYYY-MM-DDTHH:MM:SSZ（UTC，不含终点）；"
              "与 --since 同时给出时为含起点、不含终点的区间",
+    )
+    parser.add_argument(
+        "--summary",
+        action="store_true",
+        help="可选：不输出匹配行，只向标准输出写一个 JSON 统计摘要，"
+             "包含 matched_count、invalid_count、by_level 三个字段",
     )
     args = parser.parse_args(argv)
 
@@ -108,8 +115,22 @@ def main(argv=None):
     matches, warnings = iter_matches(lines, levels, request_id, since, until)
     for lineno, message in warnings:
         print(f"第 {lineno} 行：{message}", file=sys.stderr)
-    for lineno, raw in matches:
-        print(f"{lineno}\t{raw}")
+    if args.summary:
+        # 摘要模式：标准输出只有一个 JSON 对象和末尾换行，不写匹配行。
+        # by_level 按匹配记录规范化后的 level 计数：命中行必为含合法
+        # level 字段的 JSON 对象，此处重新解析不会失败。
+        by_level = {level: 0 for level in SUPPORTED_LEVELS}
+        for _, raw in matches:
+            by_level[normalize_level(json.loads(raw).get("level"))] += 1
+        summary = {
+            "matched_count": len(matches),
+            "invalid_count": len(warnings),
+            "by_level": by_level,
+        }
+        print(json.dumps(summary, ensure_ascii=False))
+    else:
+        for lineno, raw in matches:
+            print(f"{lineno}\t{raw}")
     return 0
 
 
