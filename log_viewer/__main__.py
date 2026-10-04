@@ -41,6 +41,13 @@ def main(argv=None):
              "与 --since 同时给出时为含起点、不含终点的区间",
     )
     parser.add_argument(
+        "--message-contains",
+        default=None,
+        help="可选：仅输出顶层 message 字段包含该子串的记录（区分大小写，"
+             "双方都不去除首尾空白，星号、句点等按普通文字匹配）；"
+             "message 缺失、为 null 或非字符串的记录静默不匹配",
+    )
+    parser.add_argument(
         "--summary",
         action="store_true",
         help="可选：不输出匹配行，只向标准输出写一个 JSON 统计摘要，"
@@ -78,6 +85,13 @@ def main(argv=None):
     request_id = args.request_id
     if request_id is not None and not request_id.strip():
         print("参数错误：--request-id 不能为空或全为空白", file=sys.stderr)
+        return 2
+
+    # 未传 --message-contains 时为 None；传了但为空字符串或全空白视为参数错误。
+    # 非全空白的值原样使用：不去除首尾空白，星号、句点按普通文字处理。
+    message_contains = args.message_contains
+    if message_contains is not None and not message_contains.strip():
+        print("参数错误：--message-contains 不能为空或全为空白", file=sys.stderr)
         return 2
 
     # 未传 --since 时为 None；传了但为空或格式非法视为参数错误，不读取文件。
@@ -124,7 +138,9 @@ def main(argv=None):
         part[:-1] if index < len(parts) - 1 and part.endswith("\r") else part
         for index, part in enumerate(parts)
     ]
-    matches, warnings = iter_matches(lines, levels, request_id, since, until)
+    matches, warnings = iter_matches(
+        lines, levels, request_id, since, until, message_contains
+    )
     for lineno, message in warnings:
         print(f"第 {lineno} 行：{message}", file=sys.stderr)
     if args.summary:
