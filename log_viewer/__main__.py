@@ -23,9 +23,11 @@ def main(argv=None):
     )
     parser.add_argument(
         "--request-id",
+        action="append",
         default=None,
         help="可选：仅输出顶层 request_id 字段与之精确相等（区分大小写、"
-             "保留首尾空白、不做子串匹配）的记录",
+             "保留首尾空白、不做子串匹配）的记录；可重复提供以选择多个"
+             "请求标识，记录等于其中任一所选值即通过",
     )
     parser.add_argument(
         "--since",
@@ -81,11 +83,14 @@ def main(argv=None):
             return 2
         levels.append(level)
 
-    # 未传 --request-id 时为 None；传了但为空字符串或全空白视为参数错误。
-    request_id = args.request_id
-    if request_id is not None and not request_id.strip():
-        print("参数错误：--request-id 不能为空或全为空白", file=sys.stderr)
-        return 2
+    # 未传 --request-id 时为 None；可重复提供以选择多个标识，每个值各自
+    # 校验：任一值为空字符串或全空白都判为参数错误，在读取文件之前拒绝。
+    request_ids = args.request_id
+    if request_ids is not None:
+        for request_id in request_ids:
+            if not request_id.strip():
+                print("参数错误：--request-id 不能为空或全为空白", file=sys.stderr)
+                return 2
 
     # 未传 --message-contains 时为 None；传了但为空字符串或全空白视为参数错误。
     # 非全空白的值原样使用：不去除首尾空白，星号、句点按普通文字处理。
@@ -149,7 +154,7 @@ def main(argv=None):
         for index, part in enumerate(parts)
     ]
     matches, warnings = iter_matches(
-        lines, levels, request_id, since, until, message_contains
+        lines, levels, request_ids, since, until, message_contains
     )
     for lineno, message in warnings:
         print(f"第 {lineno} 行：{message}", file=sys.stderr)

@@ -1,4 +1,4 @@
-﻿{"level":"ERROR","message":"失败"}
-
-not-json
-{"level":"INFO"}
+{"level":"ERROR","request_id":"r-1"}
+{"level":"ERROR","request_id":"r-2"}
+{"level":"ERROR","request_id":"R-1"}
+bad
