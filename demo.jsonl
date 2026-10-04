@@ -1,4 +1,5 @@
-﻿{"level":"INFO","message":"开始"}
-
+{"level":"ERROR","message":"timeout"}
+{"level":"ERROR","message":"retry"}
+{"level":"ERROR","message":"timeout retry"}
+{"level":"INFO","message":"timeout"}
 not-json
-{"level":"ERROR","message":"失败"}

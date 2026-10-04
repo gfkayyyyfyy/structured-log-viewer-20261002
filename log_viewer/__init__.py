@@ -60,10 +60,14 @@ def iter_matches(lines, level, request_id=None, since=None, until=None,
     非字符串或格式非法时产出警告并跳过该行。
     since 为含起点的下界（record_time >= since），until 为不含终点的上界
     （record_time < until）；合法但落在区间外的记录静默跳过。
-    message_contains 为 None 时不检查 message；否则还要求顶层 message 字段
-    是包含该子串的字符串（区分大小写，双方都不去除首尾空白，星号、句点等
-    按普通文字做子串匹配，Unicode 按解码后的文字比较）；字段缺失、为 null
-    或非字符串仅视为不匹配，不产生警告。
+    message_contains 为 None 时不检查 message；为字符串时按单个子串处理
+    （与旧版调用约定完全兼容）；也可传入子串字符串序列，此时还要求顶层
+    message 字段是包含其中任一子串的字符串（多个候选取并集，再与级别、
+    请求标识、时间条件取交集）。每个候选都是区分大小写的连续子串匹配，
+    双方都不去除首尾空白，星号、句点等按普通文字处理，Unicode 按 JSON
+    解码后的文字比较；候选重复、序列顺序或一条消息同时命中多个候选都不
+    影响结果：始终按文件行序，每条记录至多进入 matches 一次。字段缺失、
+    为 null 或非字符串（或只在嵌套对象中出现）仅视为不匹配，不产生警告。
     返回 (matches, warnings)，均为 (行号, 文本) 列表。
     """
     # 字符串按单级别处理；其余按级别序列处理，记录命中其中任一即通过。
@@ -77,6 +81,15 @@ def iter_matches(lines, level, request_id=None, since=None, until=None,
     else:
         selected_request_ids = frozenset(request_id)
     check_time = since is not None or until is not None
+    # message_contains 同理：字符串按单个子串处理，序列按候选列表处理，
+    # 顶层 message 包含其中任一候选即通过。any 短路判定，候选重复不改变
+    # 匹配集合；匹配仍按文件行序逐条判定，一条记录命中多个候选也只输出一次。
+    if message_contains is None:
+        message_needles = None
+    elif isinstance(message_contains, str):
+        message_needles = (message_contains,)
+    else:
+        message_needles = tuple(message_contains)
     matches = []
     warnings = []
     for lineno, raw in enumerate(lines, start=1):
@@ -106,9 +119,13 @@ def iter_matches(lines, level, request_id=None, since=None, until=None,
             value = record.get("request_id")
             if not isinstance(value, str) or value not in selected_request_ids:
                 continue
-        if message_contains is not None:
+        if message_needles is not None:
             value = record.get("message")
-            if not isinstance(value, str) or message_contains not in value:
+            # 顶层 message 必须是字符串且包含任一候选；只取一次 record.get，
+            # 嵌套对象中的 message 不会被触及。
+            if not isinstance(value, str) or not any(
+                needle in value for needle in message_needles
+            ):
                 continue
         if since is not None and record_time < since:
             continue

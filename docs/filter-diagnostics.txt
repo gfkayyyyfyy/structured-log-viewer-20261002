@@ -27,7 +27,8 @@ argparse 解析参数后，按固定顺序校验，任一失败即向标准错�
 2. 每个 --level 值经 normalize_level() 规范化后
    必须属于 SUPPORTED_LEVELS                （第 73-82 行）
 3. --request-id 不能为空或全空白            （第 85-88 行）
-4. --message-contains 不能为空或全空白      （第 92-95 行）
+4. 每个 --message-contains 值各自校验：该选项可重复给出，任一次值
+   为空字符串或全空白即参数错误（即使其他值合法）  （第 104-113 行）
 5. --since 经 parse_timestamp() 解析        （第 98-106 行）
 6. --until 经 parse_timestamp() 解析        （第 109-117 行）
 7. --since 晚于 --until 为错误；相等是合法空区间（第 120-122 行）
@@ -63,8 +64,9 @@ iter_matches(lines, levels, request_id, since, until, message_contains)，
   f. 级别不在所选集合内：静默跳过，无警告（第 92-93 行）。
   g. request_id 不精确相等（含字段缺失、为 null、非字符串）：
      静默跳过，无警告（第 94-97 行）。
-  h. message 不包含指定子串（含字段缺失、为 null、非字符串）：
-     静默跳过，无警告（第 98-101 行）。
+  h. message 不包含任一给定候选子串（可重复提供，多候选取并集；
+     含字段缺失、为 null、非字符串）：静默跳过，无警告（第 98-101 行
+     附近；iter_matches 也接受单个字符串，与旧调用约定兼容）。
   i. record_time < since：静默跳过（含起点，第 102-103 行）。
   j. record_time >= until：静默跳过（不含终点，第 104-105 行）。
   k. 全部通过：加入 matches（第 106 行）。
@@ -237,8 +239,10 @@ warnings.append(...) 之后紧跟 continue，且判定 b-e 按顺序串行执行
 即终止，标准输出保持为空，错误信息写标准错误，退出码为 2：
 
 - 参数错误（__main__.py 第 66-122 行）：--jsonl 与 --summary 同用、
-  --level 值为空/全空白/不受支持、--request-id 或 --message-contains
-  为空或全空白、--since/--until 格式非法、--since 晚于 --until。
+  --level 值为空/全空白/不受支持、--request-id 为空或全空白、
+  任一 --message-contains 值为空或全空白（该选项可重复给出，
+  其他值合法也不能覆盖该错误）、--since/--until 格式非法、
+  --since 晚于 --until。
   此外完全缺少 --level 或某次缺值由 argparse 本身以退出码 2 处理。
 - 文件读取失败（第 126-131 行）：路径不存在、是目录、无权限或内容不是
   合法 UTF-8，打印“文件读取失败：<路径>（<异常>）”。

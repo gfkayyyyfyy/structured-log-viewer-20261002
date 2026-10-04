@@ -25,20 +25,23 @@
 
 两次运行同一入口，中间由 shell 重定向把第一次的标准输出保存为文件：
 
-  python -m log_viewer demo.jsonl --level ERROR --jsonl > result.jsonl
+  python -m log_viewer example.jsonl --level ERROR --jsonl > result.jsonl
   python -m log_viewer result.jsonl --level ERROR
 
-第一次是导出：读 demo.jsonl，筛出 ERROR 记录，每条只写原始正文和一个
+第一次是导出：读 example.jsonl，筛出 ERROR 记录，每条只写原始正文和一个
 LF。第二次是再导入：把 result.jsonl 当作一份全新的输入文件，按与任何
 其他输入完全相同的规则读取、分行、筛选、输出。两次运行互不感知：
 第二次不知道行号、BOM 或行结束符在第一次之前的形态。
 
 
-2. 示例文件 demo.jsonl 的字节定义
----------------------------------
+2. 示例文件的字节定义
+---------------------
 
-仓库根目录的 demo.jsonl 即本示例文件。按 UTF-8 字节定义为四个物理行，
-文件开头只有一次 BOM（EF BB BF）：
+本文示例文件 example.jsonl 不是仓库自带文件，需按本节末尾的命令自行
+生成（仓库根目录的 demo.jsonl 是多候选消息筛选的验收样例，形状不同；
+本文关注的字节行为由 tests/test_final_bare_cr_reimport.py 按相同形状
+回归保护）。按 UTF-8 字节定义为四个物理行，文件开头只有一次 BOM
+（EF BB BF）：
 
   第 1 行  {"level":"INFO","message":"开始"}   以 LF 结束
   第 2 行  （空行）                              以 CRLF 结束
@@ -65,7 +68,7 @@ LF。第二次是再导入：把 result.jsonl 当作一份全新的输入文件�
       + b'not-json\n'
       + '{"level":"ERROR","message":"失败"}'.encode('utf-8') + b'\r'
   )
-  with open('demo.jsonl', 'wb') as f:
+  with open('example.jsonl', 'wb') as f:
       f.write(data)
   EOF
 
@@ -75,7 +78,7 @@ LF。第二次是再导入：把 result.jsonl 当作一份全新的输入文件�
 
 命令：
 
-  python -m log_viewer demo.jsonl --level ERROR --jsonl > result.jsonl
+  python -m log_viewer example.jsonl --level ERROR --jsonl > result.jsonl
 
 3.1 源码处理位置（__main__.py main()）
 
@@ -113,7 +116,7 @@ LF。第二次是再导入：把 result.jsonl 当作一份全新的输入文件�
 
 3.3 实际执行记录（当前源码实测，与 3.2 一致）
 
-  $ python3 -m log_viewer demo.jsonl --level ERROR --jsonl > result.jsonl
+  $ python3 -m log_viewer example.jsonl --level ERROR --jsonl > result.jsonl
   [标准输出，保存为 result.jsonl 后的 xxd]
   00000000: 7b22 6c65 7665 6c22 3a22 4552 524f 5222  {"level":"ERROR"
   00000010: 2c22 6d65 7373 6167 6522 3a22 e5a4 b1e8  ,"message":"....
@@ -150,7 +153,7 @@ LF。第二次是再导入：把 result.jsonl 当作一份全新的输入文件�
 
   - 行号从 1 重新计算：enumerate(lines, start=1)（__init__.py 第 82
     行）对当前输入的物理行编号。result.jsonl 只有一行内容，所以它的
-    行号是 1，与它在 demo.jsonl 中的原行号 4 无关。
+    行号是 1，与它在 example.jsonl 中的原行号 4 无关。
   - 单独 CR 此时被当作行结束符的一部分去除：result.jsonl 中该记录
     现在是“正文 + CR + LF”，按 LF 拆分后该分段以 CR 结尾且不是最后
     一个分段（末尾还有一个空分段），于是 __main__.py 第 152-156 行
