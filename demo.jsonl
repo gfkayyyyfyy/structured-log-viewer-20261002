@@ -1,4 +1,4 @@
-﻿{"level":"ERROR","message":"失败"}
+﻿{"level":"INFO","message":"开始"}
 
 not-json
-{"level":"INFO"}
+{"level":"ERROR","message":"失败"}
