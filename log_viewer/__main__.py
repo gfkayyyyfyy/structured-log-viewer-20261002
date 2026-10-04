@@ -44,10 +44,12 @@ def main(argv=None):
     )
     parser.add_argument(
         "--message-contains",
+        action="append",
         default=None,
         help="可选：仅输出顶层 message 字段包含该子串的记录（区分大小写，"
              "双方都不去除首尾空白，星号、句点等按普通文字匹配）；"
-             "message 缺失、为 null 或非字符串的记录静默不匹配",
+             "可重复提供以选择多个候选子串，message 包含其中任一候选"
+             "即通过；message 缺失、为 null 或非字符串的记录静默不匹配",
     )
     parser.add_argument(
         "--summary",
@@ -93,12 +95,19 @@ def main(argv=None):
                 print("参数错误：--request-id 不能为空或全为空白", file=sys.stderr)
                 return 2
 
-    # 未传 --message-contains 时为 None；传了但为空字符串或全空白视为参数错误。
-    # 非全空白的值原样使用：不去除首尾空白，星号、句点按普通文字处理。
+    # 未传 --message-contains 时为 None；可重复提供，每个值各自校验，任一次
+    # 为空字符串或全空白都判为参数错误，后续合法值不能覆盖该错误，
+    # 且校验在读取文件之前完成。合法值原样使用：不去除首尾空白，
+    # 星号、句点按普通文字处理。
     message_contains = args.message_contains
-    if message_contains is not None and not message_contains.strip():
-        print("参数错误：--message-contains 不能为空或全为空白", file=sys.stderr)
-        return 2
+    if message_contains is not None:
+        for candidate in message_contains:
+            if not candidate.strip():
+                print(
+                    "参数错误：--message-contains 不能为空或全为空白",
+                    file=sys.stderr,
+                )
+                return 2
 
     # 未传 --since 时为 None；传了但为空或格式非法视为参数错误，不读取文件。
     since = None
