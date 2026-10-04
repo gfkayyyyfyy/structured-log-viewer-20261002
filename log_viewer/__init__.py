@@ -38,7 +38,8 @@ def normalize_level(value):
     return value.strip().upper()
 
 
-def iter_matches(lines, level, request_id=None, since=None, until=None):
+def iter_matches(lines, level, request_id=None, since=None, until=None,
+                 message_contains=None):
     """遍历物理行，产出 (行号, 原始行, 警告)。
 
     lines 为已按行拆分且去掉行末换行符的字符串序列（行号从 1 开始）。
@@ -56,6 +57,10 @@ def iter_matches(lines, level, request_id=None, since=None, until=None):
     非字符串或格式非法时产出警告并跳过该行。
     since 为含起点的下界（record_time >= since），until 为不含终点的上界
     （record_time < until）；合法但落在区间外的记录静默跳过。
+    message_contains 为 None 时不检查 message；否则还要求顶层 message 字段
+    是包含该子串的字符串（区分大小写，不去除消息或查询文本的首尾空白，
+    星号、句点等按普通文字处理，中文及 Unicode 转义按解码后的文字比较）；
+    字段缺失、为 null 或非字符串仅视为不匹配，不产生警告。
     返回 (matches, warnings)，均为 (行号, 文本) 列表。
     """
     # 字符串按单级别处理；其余按级别序列处理，记录命中其中任一即通过。
@@ -89,6 +94,10 @@ def iter_matches(lines, level, request_id=None, since=None, until=None):
         if request_id is not None:
             value = record.get("request_id")
             if not isinstance(value, str) or value != request_id:
+                continue
+        if message_contains is not None:
+            value = record.get("message")
+            if not isinstance(value, str) or message_contains not in value:
                 continue
         if since is not None and record_time < since:
             continue
