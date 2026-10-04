@@ -35,3 +35,5 @@ $ python -m log_viewer sample.jsonl --level ERROR
 第 3 行：无效日志：JSON 解析失败   （标准错误）
 4	{"level":" error ","message":"失败"}   （标准输出）
 ```
+
+`--jsonl` 导出再导入流程的逐步说明与可复现示例（原文保留、物理行号与行结束符在这条路径上的实际含义）见 `docs/export-reimport.txt`，示例文件为仓库根目录的 `demo.jsonl`。
