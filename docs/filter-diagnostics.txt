@@ -1,0 +1,210 @@
+无效日志诊断：为什么未命中筛选条件的行仍会产生警告
+======================================================
+
+本文档解释 log_viewer 的无效行诊断行为：哪些行会被静默跳过，哪些行会
+产生警告，以及为什么。所有结论均以当前源码为依据，涉及两个文件：
+
+  - log_viewer/__main__.py   命令行入口（main 函数）
+  - log_viewer/__init__.py   核心逻辑（iter_matches 等公开函数）
+
+本文不修改任何产品代码；既有公开函数的调用及返回约定、三种输出模式
+（默认行号输出、--summary 摘要、--jsonl 导出）均保持不变。
+
+
+1. 从入口到 iter_matches 的调用链
+---------------------------------
+
+执行 python -m log_viewer 时，处理顺序如下（括号内为源码位置）：
+
+  1. 参数解析：log_viewer/__main__.py 的 main() 用 argparse 解析命令行
+     （__main__.py:11-63）。
+  2. 参数校验（全部在读取文件之前完成，任一失败即以退出码 2 结束，
+     标准输出为空）：
+       - --jsonl 与 --summary 互斥（__main__.py:66-68）；
+       - 每个 --level 经 normalize_level() 规范化后必须属于
+         SUPPORTED_LEVELS（__main__.py:73-82，调用
+         log_viewer/__init__.py:34 的 normalize_level）；
+       - --request-id、--message-contains 不能为空或全空白
+         （__main__.py:85-95）；
+       - --since、--until 经 parse_timestamp() 解析，格式必须严格为
+         YYYY-MM-DDTHH:MM:SSZ，且 --since 不得晚于 --until
+         （__main__.py:98-122，调用 __init__.py:18 的 parse_timestamp）。
+  3. 读取文件：以 UTF-8、newline="" 打开并整体读入
+     （__main__.py:126-131）。OSError 或 UnicodeDecodeError 打印
+     "文件读取失败" 到标准错误并以退出码 2 结束，标准输出为空。
+     随后剥离文件开头至多一次的 UTF-8 BOM（__main__.py:140-141）。
+  4. 拆分物理行：按 LF 拆分，仅对被 LF 终止的分段去掉 CRLF 中紧邻
+     LF 的 CR；最后一个无终止 LF 的分段原样保留（__main__.py:146-150）。
+  5. 筛选：调用 iter_matches(lines, levels, request_id, since, until,
+     message_contains)（__main__.py:151-153），返回
+     (matches, warnings) 两个 (行号, 文本) 列表。
+  6. 输出：先把所有警告按 "第 N 行：<消息>" 写到标准错误
+     （__main__.py:154-155），再按三种互斥模式之一写标准输出
+     （__main__.py:156-183），正常结束退出码为 0。
+
+iter_matches 内部对每一物理行依次执行（__init__.py:71-106）：
+
+  a. 空白行（去除首尾空白后为空）直接跳过：占行号，但不计为无效，
+     不产生警告（__init__.py:72-73）。
+  b. json.loads 解析；失败 → 警告 "无效日志：JSON 解析失败"
+     （__init__.py:74-78）。
+  c. 顶层必须是 JSON 对象；否则 → 警告 "无效日志：顶层不是 JSON 对象"
+     （__init__.py:79-81）。
+  d. level 经 normalize_level 后必须属于 SUPPORTED_LEVELS；否则 →
+     警告 "无效日志：level 缺失或不属于支持的级别"
+     （__init__.py:82-85）。
+  e. 仅当给出了 --since 或 --until 之一时（check_time，
+     __init__.py:68）才检查 timestamp：缺失、为 null、非字符串或
+     格式非法 → 警告 "无效日志：timestamp 缺失或格式无效"
+     （__init__.py:86-91）。注意此检查在级别筛选之前，因此级别
+     不匹配的行只要启用了时间筛选，仍会因 timestamp 无效而产生
+     警告。未启用时间筛选时完全不检查 timestamp。
+  f. 之后的条件不满足时一律静默跳过，不产生警告：
+     级别不在所选集合内（__init__.py:92-93）、request_id 不相等
+     （__init__.py:94-97）、message 不含子串（__init__.py:98-101）、
+     时间落在区间外（__init__.py:102-105，since 含起点、until 不含
+     终点）。
+
+关键结论：步骤 b–e 中任一失败都执行 continue，因此每个无效的非空行
+最多产生一条警告（按上述顺序取第一个失败原因）；而通过全部校验、
+仅仅不满足筛选条件的行（步骤 f）被静默跳过，既不输出也不警告。
+这正是 "未命中筛选条件的行仍可能产生警告" 的原因：警告针对的是
+"无效行"（无法解析或缺少必备字段），而不是 "未匹配行"。
+
+
+2. 示例文件 demo.jsonl
+----------------------
+
+六行 UTF-8 文本，以 LF 分隔（第一行为空白行，即空行）：
+
+  第 1 行：（空行）
+  第 2 行：{
+  第 3 行：{"level":"TRACE"}
+  第 4 行：{"level":"INFO"}
+  第 5 行：{"level":" error ","request_id":"r-1","timestamp":"2026-10-03T10:00:00Z"}
+  第 6 行：{"level":"ERROR","request_id":"r-1","timestamp":"2026-10-03T10:01:00Z"}
+
+可用以下命令生成（printf 的 \n 即 LF）：
+
+  printf '\n{\n{"level":"TRACE"}\n{"level":"INFO"}\n{"level":" error ","request_id":"r-1","timestamp":"2026-10-03T10:00:00Z"}\n{"level":"ERROR","request_id":"r-1","timestamp":"2026-10-03T10:01:00Z"}\n' > demo.jsonl
+
+
+3. 复现命令一：默认输出 + 时间区间
+----------------------------------
+
+命令：
+
+  python -m log_viewer demo.jsonl --level ERROR --request-id r-1 \
+      --since 2026-10-03T10:00:00Z --until 2026-10-03T10:01:00Z
+
+预期标准输出（行号与原文之间是一个制表符，行末有 LF）：
+
+  5	{"level":" error ","request_id":"r-1","timestamp":"2026-10-03T10:00:00Z"}
+
+预期标准错误：
+
+  第 2 行：无效日志：JSON 解析失败
+  第 3 行：无效日志：level 缺失或不属于支持的级别
+  第 4 行：无效日志：timestamp 缺失或格式无效
+
+预期退出码：0
+
+逐行判断位置（均在 log_viewer/__init__.py 的 iter_matches 内）：
+
+  第 1 行：空白行，__init__.py:72-73 静默跳过；占行号但不计为无效。
+  第 2 行：只有一个左花括号，json.loads 失败，
+           __init__.py:74-78 → 警告 "JSON 解析失败"。
+  第 3 行：TRACE 不属于 SUPPORTED_LEVELS，
+           __init__.py:82-85 → 警告 "level 缺失或不属于支持的级别"。
+  第 4 行：level 为 INFO、合法，但启用了时间筛选（check_time），
+           该行缺少 timestamp，__init__.py:86-91 → 警告
+           "timestamp 缺失或格式无效"。注意：即使其级别 INFO 不在
+           所选集合内，时间校验（步骤 e）仍先于级别筛选（步骤 f）
+           执行，所以这条警告照常产生。
+  第 5 行：level " error " 经 normalize_level 规范化为 "ERROR"
+           （__init__.py:34-38），timestamp 恰等于 --since，
+           含起点（record_time >= since，__init__.py:102），
+           request_id 相等 → 匹配，默认模式按 "行号<TAB>原文"
+           输出（__main__.py:181-183）。
+  第 6 行：全部校验通过，但 timestamp 恰等于 --until，终点排除
+           （record_time < until 不成立，__init__.py:104-105）→
+           静默跳过，无警告。
+
+
+4. 复现命令二：--summary 摘要、无时间边界
+-----------------------------------------
+
+命令：
+
+  python -m log_viewer demo.jsonl --level ERROR --request-id r-1 --summary
+
+预期标准输出（单个 JSON 对象加末尾换行）：
+
+  {"matched_count": 2, "invalid_count": 2, "by_level": {"DEBUG": 0, "INFO": 0, "WARNING": 0, "ERROR": 2, "CRITICAL": 0}}
+
+预期标准错误：
+
+  第 2 行：无效日志：JSON 解析失败
+  第 3 行：无效日志：level 缺失或不属于支持的级别
+
+预期退出码：0
+
+逐行判断位置：
+
+  第 1 行：空白行，__init__.py:72-73 静默跳过。
+  第 2 行：JSON 解析失败，__init__.py:74-78 → 警告。
+  第 3 行：TRACE 不受支持，__init__.py:82-85 → 警告。
+  第 4 行：未传 --since/--until，check_time 为 False
+           （__init__.py:68），完全不检查 timestamp，所以缺少
+           timestamp 不再构成无效；level INFO 合法但不在所选集合
+           内，__init__.py:92-93 静默跳过，无警告。
+  第 5 行：level 规范化后为 ERROR、request_id 相等 → 匹配。
+  第 6 行：ERROR 且 request_id 相等；无时间边界时 timestamp 不参与
+           任何判断 → 匹配。
+
+摘要由 __main__.py:156-168 生成：matched_count 为匹配数（2），
+invalid_count 为警告数（2），by_level 按匹配行规范化后的 level
+计数（ERROR 为 2，DEBUG/INFO/WARNING/CRITICAL 均为 0）。摘要模式
+不输出匹配行本身。
+
+
+5. 实际执行记录（与上文预期对照）
+---------------------------------
+
+以下为在当前源码上实际运行上述两条命令的记录，与第 3、4 节的预期
+完全一致（预期结果为依据源码推导的判断，本节的实际执行为验证记录，
+两者明确区分）。
+
+命令一实际结果：
+
+  退出码：0
+  标准输出（cat -A 显示，^I 为制表符、$ 为行末 LF）：
+    5^I{"level":" error ","request_id":"r-1","timestamp":"2026-10-03T10:00:00Z"}$
+  标准错误：
+    第 2 行：无效日志：JSON 解析失败
+    第 3 行：无效日志：level 缺失或不属于支持的级别
+    第 4 行：无效日志：timestamp 缺失或格式无效
+
+命令二实际结果：
+
+  退出码：0
+  标准输出：
+    {"matched_count": 2, "invalid_count": 2, "by_level": {"DEBUG": 0, "INFO": 0, "WARNING": 0, "ERROR": 2, "CRITICAL": 0}}
+  标准错误：
+    第 2 行：无效日志：JSON 解析失败
+    第 3 行：无效日志：level 缺失或不属于支持的级别
+
+
+6. 其他退出路径（不变）
+-----------------------
+
+  - 参数错误（级别不受支持、--request-id/--message-contains 全空白、
+    --since/--until 格式非法或起点晚于终点、--jsonl 与 --summary
+    同用）：向标准错误打印 "参数错误：..."，退出码 2，标准输出为空
+    （__main__.py:66-122）。所有参数校验都在读取文件之前完成。
+  - 文件读取失败（OSError 或 UnicodeDecodeError）：向标准错误打印
+    "文件读取失败：..."，退出码 2，标准输出为空
+    （__main__.py:126-131）。
+
+以上行为以及 iter_matches、normalize_level、parse_timestamp 的调用
+与返回约定、三种输出模式均为既有约定，本文档仅为说明，不作任何改动。
