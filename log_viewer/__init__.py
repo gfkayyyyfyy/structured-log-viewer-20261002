@@ -48,9 +48,12 @@ def iter_matches(lines, level, request_id=None, since=None, until=None,
     也可传入级别字符串序列（元素应为已规范化、属于 SUPPORTED_LEVELS 的值），
     此时记录级别属于其中任一所选级别即通过：只做相等匹配，不解释为严重程度
     阈值；重复级别不增加输出，序列顺序也不影响匹配行顺序（始终按文件行序）。
-    request_id 为 None 时只按级别筛选；否则还要求顶层 request_id 字段
-    是与之严格相等的字符串（区分大小写，不去除首尾空白，不做子串匹配）；
-    字段缺失、为 null 或非字符串仅视为不匹配，不产生警告。
+    request_id 为 None 时只按级别筛选；为字符串时按单个标识处理（与旧版
+    调用约定完全兼容）；也可传入标识字符串序列，此时记录顶层 request_id
+    字段等于其中任一值即通过：只做严格相等匹配（区分大小写，不去除首尾
+    空白，不做子串匹配），重复标识不增加输出，序列顺序也不影响匹配行顺序
+    （始终按文件行序）；字段缺失、为 null、非字符串或只在嵌套对象中出现
+    仅视为不匹配，不产生警告。
     since、until 均为 None 时不检查 timestamp；否则（datetime，UTC）
     只要给出任一时刻就启用时间检查，所有可解析为对象且 level 合法的非空记录
     都检查顶层 timestamp（包括级别不在所选集合内的记录）：缺失、为 null、
@@ -65,6 +68,14 @@ def iter_matches(lines, level, request_id=None, since=None, until=None,
     """
     # 字符串按单级别处理；其余按级别序列处理，记录命中其中任一即通过。
     selected_levels = (level,) if isinstance(level, str) else tuple(level)
+    # request_id 同理：字符串按单个标识处理，序列按标识集合处理，
+    # 记录顶层 request_id 等于其中任一值即通过。
+    if request_id is None:
+        selected_request_ids = None
+    elif isinstance(request_id, str):
+        selected_request_ids = (request_id,)
+    else:
+        selected_request_ids = frozenset(request_id)
     check_time = since is not None or until is not None
     matches = []
     warnings = []
@@ -91,9 +102,9 @@ def iter_matches(lines, level, request_id=None, since=None, until=None,
                 continue
         if record_level not in selected_levels:
             continue
-        if request_id is not None:
+        if selected_request_ids is not None:
             value = record.get("request_id")
-            if not isinstance(value, str) or value != request_id:
+            if not isinstance(value, str) or value not in selected_request_ids:
                 continue
         if message_contains is not None:
             value = record.get("message")

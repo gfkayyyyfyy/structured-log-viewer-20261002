@@ -1,4 +1,4 @@
-"""命令行入口：python -m log_viewer <文件路径> --level <级别> [--level <级别> ...]"""
+"""命令行入口：python -m log_viewer <文件路径> --level <级别> [--level <级别> ...] [--request-id <标识> ...]"""
 
 import argparse
 import json
@@ -23,9 +23,11 @@ def main(argv=None):
     )
     parser.add_argument(
         "--request-id",
+        action="append",
         default=None,
         help="可选：仅输出顶层 request_id 字段与之精确相等（区分大小写、"
-             "保留首尾空白、不做子串匹配）的记录",
+             "保留首尾空白、不做子串匹配）的记录；可重复提供以选择多个"
+             "请求标识，记录等于其中任一值即通过",
     )
     parser.add_argument(
         "--since",
@@ -81,11 +83,15 @@ def main(argv=None):
             return 2
         levels.append(level)
 
-    # 未传 --request-id 时为 None；传了但为空字符串或全空白视为参数错误。
-    request_id = args.request_id
-    if request_id is not None and not request_id.strip():
-        print("参数错误：--request-id 不能为空或全为空白", file=sys.stderr)
-        return 2
+    # 未传 --request-id 时为 None；可重复提供，每个值各自校验，任一次
+    # 为空字符串或全空白都判为参数错误，后续合法值不能覆盖该错误，
+    # 且校验在读取文件之前完成。合法值原样保留：不去除首尾空白。
+    request_ids = args.request_id
+    if request_ids is not None:
+        for request_id in request_ids:
+            if not request_id.strip():
+                print("参数错误：--request-id 不能为空或全为空白", file=sys.stderr)
+                return 2
 
     # 未传 --message-contains 时为 None；传了但为空字符串或全空白视为参数错误。
     # 非全空白的值原样使用：不去除首尾空白，星号、句点按普通文字处理。
@@ -149,7 +155,7 @@ def main(argv=None):
         for index, part in enumerate(parts)
     ]
     matches, warnings = iter_matches(
-        lines, levels, request_id, since, until, message_contains
+        lines, levels, request_ids, since, until, message_contains
     )
     for lineno, message in warnings:
         print(f"第 {lineno} 行：{message}", file=sys.stderr)
