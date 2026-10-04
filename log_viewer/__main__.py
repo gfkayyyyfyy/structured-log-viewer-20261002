@@ -130,6 +130,15 @@ def main(argv=None):
         print(f"文件读取失败：{args.path}（{exc}）", file=sys.stderr)
         return 2
 
+    # 兼容文件开头的 UTF-8 BOM（EF BB BF）：解码后表现为正文最前面的
+    # 一个 U+FEFF，只在整个文件的最开头剥掉这一次，它不属于日志正文，
+    # 也不占物理行号。连续第二个 BOM、空白之后的 BOM 以及 JSON 字符串
+    # 值中的 U+FEFF 都属于正文，原样保留并按既有规则处理（第二个 BOM
+    # 会使所在行 JSON 解析失败并产生警告）。剥除发生在整个文件解码
+    # 成功之后：BOM 之后若有非法 UTF-8 字节，仍按文件读取失败处理。
+    if content.startswith("\ufeff"):
+        content = content[1:]
+
     # 物理行只由 LF（LF 或 CRLF）终止：按 LF 拆分后，仅对被 LF 终止的
     # 分段（除最后一个外）去掉 CRLF 中紧邻 LF 的那个 CR。
     # 最后一个分段没有终止 LF：即使以 CR 结尾也原样保留（末行结尾的单独 CR）。
