@@ -19,3 +19,6 @@ dist/
 *.db-shm
 .DS_Store
 Thumbs.db
+
+# 演示导出产物：docs/export-reimport.txt 流程中由重定向生成，不随源码交付
+result.jsonl
