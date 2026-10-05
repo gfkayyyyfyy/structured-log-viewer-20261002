@@ -52,4 +52,13 @@ python3 -m unittest discover -s tests
   每条记录只输出或计数一次；只传一次或不传保持既有语义；任一候选为空
   或全空白（即使其他候选合法）退出码 2 且先于读文件；iter_matches 接受
   候选序列，单子串字符串的旧调用约定与返回结构保持兼容。
+- `--message-excludes` 消息子串排除（`test_message_excludes.py`）：
+  八行合法 ERROR 样例（timeout / timeout retry / Timeout / retry /
+  message 缺失 / null / 数字 / 仅嵌套出现）排除 timeout、retry 后只输出
+  原始第 3、5、6、7、8 行，保持原序、原文与“行号<Tab>原文”格式；
+  排除值顺序交换、重复不影响输出，不传该选项时八行全输出；与
+  `--message-contains` 取交集；`a.*b` 按普通文字排除（保留 axb），
+  合法值首尾空白参与匹配；配合 `--since` 时无效 timestamp 与 JSON 解析
+  诊断各按原行号输出且不被排除条件遮蔽，退出码 0；排除值为空或全空白
+  （即使另有合法值且路径不存在）只报参数错误、标准输出为空、退出码 2。
 - `normalize_level` 与 `iter_matches` 的公开返回约定。
