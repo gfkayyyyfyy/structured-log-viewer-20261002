@@ -11,6 +11,7 @@
     5. --since 的 UTC 格式
     6. --until 的 UTC 格式
     7. --since 不晚于 --until
+    8. --line-range 重复提供、区间格式、零端点、起点大于终点
 
 全部参数校验通过之后才进入文件读取阶段。
 
@@ -38,6 +39,17 @@
   路径（系统异常细节不作固定要求）；
 - 用临时文件中的非法 UTF-8 字节复核输出开关互斥这一最高优先级：即使
   文件读取必然失败，结果仍只有互斥错误，以此区分参数拒绝与文件读取错误。
+
+行号区间（优先级最低的一类参数校验）与其他错误并存的覆盖：
+
+- 对不存在的路径同时传入 --level TRACE、--jsonl、--summary 和
+  --line-range 0:2 时只出现互斥错误；去掉两个导出开关后只出现级别错误，
+  即行号区间的零端点错误不会越过更靠前的规则暴露；
+- 其余参数均合法而 --line-range 重复提供且其中一次为非法值时，
+  只出现重复提供错误（重复检查先于格式、零端点和起止关系检查）；
+- 合法 ERROR 级别、相等的起止时间和合法行号区间通过全部校验，
+  随后因路径不存在返回退出码 2，标准输出为空，标准错误报告文件读取
+  失败且不含任何参数错误。
 
 测试数据与不存在的路径均由用例在临时目录中准备并自动清理，不依赖仓库
 样例（sample.jsonl 等）或外部服务；比较按原始字节进行（不开 text=True），
@@ -73,6 +85,7 @@ ERROR_MESSAGE_CONTAINS = "参数错误：--message-contains 不能为空或全�
 ERROR_SINCE = "参数错误：--since 必须是 YYYY-MM-DDTHH:MM:SSZ 格式的 UTC 时间"
 ERROR_UNTIL = "参数错误：--until 必须是 YYYY-MM-DDTHH:MM:SSZ 格式的 UTC 时间"
 ERROR_ORDER = "参数错误：--since 不能晚于 --until"
+ERROR_LINE_RANGE_DUPLICATE = "参数错误：--line-range 只能提供一次"
 
 READ_FAILURE_MESSAGE = "文件读取失败".encode("utf-8")
 INVALID_LOG_WARNING = "无效日志".encode("utf-8")
@@ -283,6 +296,100 @@ class ValidationPriorityTests(unittest.TestCase):
             proc.stderr,
             ERROR_MUTEX.encode("utf-8") + RECORD_TERMINATOR,
         )
+
+
+class LineRangeValidationPriorityTests(unittest.TestCase):
+    """行号区间校验与其他参数错误并存时，仍按固定优先级只报最先的问题。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        # 确定不存在的路径：临时目录内不创建该文件。
+        self.missing_path = Path(self._tmp.name) / "missing.jsonl"
+        self.assertFalse(self.missing_path.exists())
+
+    def assert_single_error(self, argv, expected_message):
+        """公共断言：退出码 2、标准输出为空、标准错误恰为一条参数错误。"""
+        proc = run_cli_bytes(argv)
+        self.assertEqual(
+            proc.returncode, 2,
+            f"应退出 2，实际 {proc.returncode}；argv={argv!r}；"
+            f"stderr={proc.stderr!r}",
+        )
+        self.assertEqual(
+            proc.stdout, b"",
+            f"参数错误时标准输出必须为空，实际 {proc.stdout!r}",
+        )
+        self.assertEqual(
+            proc.stderr,
+            expected_message.encode("utf-8") + RECORD_TERMINATOR,
+            f"标准错误应只有一条参数错误；argv={argv!r}",
+        )
+
+    def test_mutex_outranks_level_and_line_range_errors(self):
+        """互斥、级别非法、行号区间零端点并存：只报告输出开关互斥。"""
+        argv = build_argv(
+            self.missing_path,
+            [
+                ("--jsonl", True),
+                ("--summary", True),
+                ("--level", "TRACE"),
+                ("--line-range", "0:2"),
+            ],
+        )
+        self.assert_single_error(argv, ERROR_MUTEX)
+
+    def test_level_outranks_line_range_error(self):
+        """去掉导出开关后：级别非法优先于行号区间的零端点错误。"""
+        argv = build_argv(
+            self.missing_path,
+            [
+                ("--level", "TRACE"),
+                ("--line-range", "0:2"),
+            ],
+        )
+        self.assert_single_error(argv, ERROR_LEVEL)
+
+    def test_duplicate_line_range_reported_before_value_checks(self):
+        """其余参数合法、行号区间重复提供且含非法值：只报告重复提供。"""
+        argv = build_argv(
+            self.missing_path,
+            [
+                ("--level", "ERROR"),
+                ("--request-id", "r-1"),
+                ("--message-contains", "timeout"),
+                ("--since", "2026-10-03T10:00:00Z"),
+                ("--until", "2026-10-03T10:00:01Z"),
+                ("--line-range", "1:2"),
+                ("--line-range", "bad"),
+            ],
+        )
+        self.assert_single_error(argv, ERROR_LINE_RANGE_DUPLICATE)
+
+    def test_valid_line_range_reaches_file_read(self):
+        """合法级别、相等起止与合法行号区间通过校验，随后读取失败。"""
+        argv = build_argv(
+            self.missing_path,
+            [
+                ("--level", "ERROR"),
+                ("--since", "2026-10-03T10:00:00Z"),
+                ("--until", "2026-10-03T10:00:00Z"),
+                ("--line-range", "1:2"),
+            ],
+        )
+        proc = run_cli_bytes(argv)
+        self.assertEqual(
+            proc.returncode, 2,
+            f"应退出 2，实际 {proc.returncode}；stderr={proc.stderr!r}",
+        )
+        self.assertEqual(proc.stdout, b"")
+        # 标准错误包含“文件读取失败”与该路径；系统异常细节不作固定要求。
+        self.assertIn(READ_FAILURE_MESSAGE, proc.stderr)
+        self.assertIn(os.fsencode(str(self.missing_path)), proc.stderr)
+        # 不得再出现任何参数错误：合法参数不会提前结束校验流程。
+        self.assertNotIn("参数错误".encode("utf-8"), proc.stderr)
+        self.assertNotIn(INVALID_LOG_WARNING, proc.stderr)
+        self.assertNotIn(TRACEBACK, proc.stderr)
 
 
 if __name__ == "__main__":
