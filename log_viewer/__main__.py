@@ -1,4 +1,4 @@
-"""命令行入口：python -m log_viewer <文件路径> --level <级别> [--level <级别> ...] [--request-id <标识> ...] [--message-contains <子串> ...] [--message-excludes <子串> ...] [--line-range START:END]"""
+"""命令行入口：python -m log_viewer <文件路径> --level <级别> [--level <级别> ...] [--request-id <标识> ...] [--message-contains <子串> ...] [--message-excludes <子串> ...] [--line-range START:END] [--strict]"""
 
 import argparse
 import json
@@ -221,6 +221,14 @@ def main(argv=None):
              "原始正文和末尾换行，不带行号与制表符前缀，不加外层数组或"
              "统计字段，正文不重新序列化；不能与 --summary 同时使用",
     )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="可选：无值开关，重复提供等同于一次；仍检查全文件、完成筛选"
+             "与输出，不提前结束；只要本次产出至少一条无效日志警告，"
+             "最终退出码为 1，否则为 0。不传时即使存在无效行也退出 0。"
+             "--strict=true 等带值写法属于参数错误（退出码 2）。",
+    )
     args = parser.parse_args(argv)
 
     # 参数解析成功之后、读取文件之前的全部校验：错误优先级固定且与选项
@@ -309,6 +317,11 @@ def main(argv=None):
     else:
         for lineno, raw in matches:
             print(f"{lineno}\t{raw}")
+    # --strict 不改变任何输出或警告，只影响最终退出码：本次全文件扫描
+    # 只要产出过至少一条无效日志警告（含 --line-range 范围外的行），
+    # 退出码即为 1；无警告时为 0。不传时即使存在无效行也保持退出 0。
+    if args.strict and warnings:
+        return 1
     return 0
 
 
