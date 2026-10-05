@@ -135,12 +135,15 @@ def iter_matches(lines, level, request_id=None, since=None, until=None,
             continue
         try:
             record = json.loads(raw)
-        except ValueError:
+        except (ValueError, RecursionError):
             # JSONDecodeError 是 ValueError 的子类，此处一并覆盖；
             # 此外 Python 3.11+ 在整数转换位数受限（sys.get_int_max_str_digits，
             # 可用 PYTHONINTMAXSTRDIGITS 调整）时，对超过限制的 JSON 数字
             # 直接抛出普通 ValueError 而非 JSONDecodeError，同样按解析失败
             # 处理：只跳过该物理行并产出一条警告，不中断整个文件的处理。
+            # 嵌套过深时 JSON 解码器抛出 RecursionError，也按解析失败处理：
+            # 异常传播到此处时调用栈已完全展开，后续行的解码不受影响；
+            # 不新增深度阈值，也不调整解释器递归上限。
             warnings.append((lineno, "无效日志：JSON 解析失败"))
             continue
         if not isinstance(record, dict):
