@@ -1,4 +1,4 @@
-"""命令行入口：python -m log_viewer <文件路径> --level <级别> [--level <级别> ...] [--request-id <标识> ...] [--message-contains <子串> ...] [--line-range START:END]"""
+"""命令行入口：python -m log_viewer <文件路径> --level <级别> [--level <级别> ...] [--request-id <标识> ...] [--message-contains <子串> ...] [--message-excludes <子串> ...] [--line-range START:END]"""
 
 import argparse
 import json
@@ -30,16 +30,17 @@ def _validate_options(args):
     多个问题同时存在时只报告下面固定顺序中的第一个；选项在命令行中的排列
     不影响该顺序。失败返回 None（错误已写入标准错误）；成功返回包含校验后
     取值的字典：levels（已规范化）、request_ids、message_contains、
-    since、until、line_range（均可能为 None）。
+    message_excludes、since、until、line_range（均可能为 None）。
 
       1. --jsonl 与 --summary 互斥
       2. 每个 --level 的级别合法性（逐个校验）
       3. 每个 --request-id 非空白（逐个校验，合法值保留首尾空白）
       4. 每个 --message-contains 非空白（逐个校验，合法值保留首尾空白）
-      5. --since 的 UTC 格式
-      6. --until 的 UTC 格式
-      7. --since 不晚于 --until（起止相等合法）
-      8. --line-range：重复提供 → 格式 → 零端点 → 起点大于终点
+      5. 每个 --message-excludes 非空白（逐个校验，合法值保留首尾空白）
+      6. --since 的 UTC 格式
+      7. --until 的 UTC 格式
+      8. --since 不晚于 --until（起止相等合法）
+      9. --line-range：重复提供 → 格式 → 零端点 → 起点大于终点
     """
     # 1. 两种输出模式互斥：在读取文件之前拒绝，标准输出保持为空。
     if args.jsonl and args.summary:
@@ -77,7 +78,18 @@ def _validate_options(args):
                     "参数错误：--message-contains 不能为空或全为空白"
                 )
 
-    # 5/6. 未传时为 None；传了但为空或格式非法视为参数错误，不读取文件。
+    # 5. 未传 --message-excludes 时为 None；可重复提供，每个值各自校验，
+    # 任一值为空字符串或全空白都判为参数错误，即使其他值合法也不能覆盖。
+    # 合法值原样保留：不去除首尾空白，星号、句点按普通文字处理。
+    message_excludes = args.message_excludes
+    if message_excludes is not None:
+        for needle in message_excludes:
+            if not needle.strip():
+                return _fail(
+                    "参数错误：--message-excludes 不能为空或全为空白"
+                )
+
+    # 6/7. 未传时为 None；传了但为空或格式非法视为参数错误，不读取文件。
     since = None
     if args.since is not None:
         since = parse_timestamp(args.since)
@@ -93,11 +105,11 @@ def _validate_options(args):
                 "参数错误：--until 必须是 YYYY-MM-DDTHH:MM:SSZ 格式的 UTC 时间"
             )
 
-    # 7. 起点严格晚于终点为参数错误；起止相等是合法的空区间。
+    # 8. 起点严格晚于终点为参数错误；起止相等是合法的空区间。
     if since is not None and until is not None and since > until:
         return _fail("参数错误：--since 不能晚于 --until")
 
-    # 8. 未传 --line-range 时为 None。先拒绝重复提供；区间文本必须是
+    # 9. 未传 --line-range 时为 None。先拒绝重复提供；区间文本必须是
     # START:END：两端为只含 ASCII 数字的正十进制整数（允许前导零，不接受
     # 符号或空白）；端点为零、起点大于终点同样在读取文件之前拒绝。
     # 端点以去前导零的数字符串保存，不转 int，位数不受
@@ -121,6 +133,7 @@ def _validate_options(args):
         "levels": levels,
         "request_ids": request_ids,
         "message_contains": message_contains,
+        "message_excludes": message_excludes,
         "since": since,
         "until": until,
         "line_range": line_range,
@@ -174,6 +187,17 @@ def main(argv=None):
              "message 缺失、为 null 或非字符串的记录静默不匹配",
     )
     parser.add_argument(
+        "--message-excludes",
+        action="append",
+        default=None,
+        help="可选：剔除顶层 message 字段包含该子串的记录（区分大小写，"
+             "双方都不去除首尾空白，星号、句点等按普通文字匹配）；"
+             "可重复提供以给出多个排除值，message 包含其中任一即被剔除，"
+             "再与级别、请求标识、时间和消息包含条件取交集；排除值重复或"
+             "顺序不影响结果；message 缺失、为 null、非字符串或只出现在"
+             "嵌套对象中的记录不因排除条件丢弃，也不产生警告",
+    )
+    parser.add_argument(
         "--line-range",
         action="append",
         default=None,
@@ -207,6 +231,7 @@ def main(argv=None):
     levels = options["levels"]
     request_ids = options["request_ids"]
     message_contains = options["message_contains"]
+    message_excludes = options["message_excludes"]
     since = options["since"]
     until = options["until"]
     line_range = options["line_range"]
@@ -239,7 +264,8 @@ def main(argv=None):
         for index, part in enumerate(parts)
     ]
     matches, warnings = iter_matches(
-        lines, levels, request_ids, since, until, message_contains
+        lines, levels, request_ids, since, until, message_contains,
+        message_excludes=message_excludes,
     )
     # 行号区间只限制匹配结果，不影响全文件诊断：warnings 保持原样，
     # 区间外的损坏 JSON、顶层非对象、无效级别及（启用时间筛选时）
