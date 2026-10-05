@@ -1,4 +1,4 @@
-"""命令行入口：python -m log_viewer <文件路径> --level <级别> [--level <级别> ...] [--request-id <标识> ...] [--message-contains <子串> ...] [--message-excludes <子串> ...] [--line-range START:END]"""
+"""命令行入口：python -m log_viewer <文件路径> --level <级别> [--level <级别> ...] [--request-id <标识> ...] [--message-contains <子串> ...] [--message-excludes <子串> ...] [--line-range START:END] [--strict]"""
 
 import argparse
 import json
@@ -221,6 +221,15 @@ def main(argv=None):
              "原始正文和末尾换行，不带行号与制表符前缀，不加外层数组或"
              "统计字段，正文不重新序列化；不能与 --summary 同时使用",
     )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="可选：无值开关，重复提供等同于提供一次。不提供时保持现状："
+             "文件正常处理完成即退出 0，包括存在无效行的情况。提供时仍"
+             "检查全文件、完成筛选和输出，只要本次产生至少一条无效日志"
+             "警告，最终退出码就为 1，否则为 0；不提前结束，也不丢弃"
+             "后续有效结果。两路输出与未开启时完全一致，不追加提示",
+    )
     args = parser.parse_args(argv)
 
     # 参数解析成功之后、读取文件之前的全部校验：错误优先级固定且与选项
@@ -309,6 +318,11 @@ def main(argv=None):
     else:
         for lineno, raw in matches:
             print(f"{lineno}\t{raw}")
+    # 严格模式：输出与退出码解耦。无论是否开启都先完成全文件检查、筛选
+    # 和全部输出；开启后只要本次产生过至少一条无效日志警告就退出 1，
+    # 否则退出 0。未开启时保持现状，恒为 0。
+    if args.strict and warnings:
+        return 1
     return 0
 
 
