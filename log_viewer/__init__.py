@@ -97,7 +97,12 @@ def iter_matches(lines, level, request_id=None, since=None, until=None,
             continue
         try:
             record = json.loads(raw)
-        except json.JSONDecodeError:
+        except ValueError:
+            # JSONDecodeError 是 ValueError 的子类：普通语法错误走这里。
+            # Python 3.11 起受 PYTHONINTMAXSTRDIGITS / sys 整数转换位数
+            # 限制约束时，含超长十进制整数（超过运行环境位数上限）的行在
+            # JSON 扫描阶段抛普通 ValueError（不是 JSONDecodeError）；它同样
+            # 表示这一行无法解析为 JSON，按既有无效日志规则只警告并跳过该行。
             warnings.append((lineno, "无效日志：JSON 解析失败"))
             continue
         if not isinstance(record, dict):
