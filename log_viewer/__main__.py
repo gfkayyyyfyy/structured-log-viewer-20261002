@@ -1,10 +1,17 @@
-"""命令行入口：python -m log_viewer <文件路径> --level <级别> [--level <级别> ...] [--request-id <标识> ...] [--message-contains <子串> ...]"""
+"""命令行入口：python -m log_viewer <文件路径> --level <级别> [--level <级别> ...] [--request-id <标识> ...] [--message-contains <子串> ...] [--line-range START:END]"""
 
 import argparse
 import json
 import sys
 
-from . import SUPPORTED_LEVELS, iter_matches, normalize_level, parse_timestamp
+from . import (
+    SUPPORTED_LEVELS,
+    compare_decimal_strings,
+    iter_matches,
+    normalize_level,
+    parse_line_range,
+    parse_timestamp,
+)
 
 
 def main(argv=None):
@@ -52,6 +59,17 @@ def main(argv=None):
              "再与级别、请求标识和时间条件取交集；候选重复或顺序不影响"
              "结果，一条消息命中多个候选也只输出一次；"
              "message 缺失、为 null 或非字符串的记录静默不匹配",
+    )
+    parser.add_argument(
+        "--line-range",
+        action="append",
+        default=None,
+        metavar="START:END",
+        help="可选：只让原始物理行号落在 [START, END] 闭区间内的记录参与"
+             "匹配，与级别等其余筛选条件取交集，按原文件顺序输出且不重新"
+             "编号；两端均为包含边界，相等时只选一行；端点只接受 ASCII"
+             "正十进制整数（允许前导零，不接受符号或空白）；只能提供一次；"
+             "范围只限制匹配结果，全文件的无效行诊断不受影响",
     )
     parser.add_argument(
         "--summary",
@@ -138,6 +156,31 @@ def main(argv=None):
         print("参数错误：--since 不能晚于 --until", file=sys.stderr)
         return 2
 
+    # 未传 --line-range 时为 None；重复提供判为参数错误。区间文本必须是
+    # START:END：两端为只含 ASCII 数字的正十进制整数（允许前导零，不接受
+    # 符号或空白）；端点为零、起点大于终点同样在读取文件之前拒绝。
+    # 端点以去前导零的数字符串保存，不转 int，位数不受
+    # sys.get_int_max_str_digits 限制。
+    line_range = None
+    if args.line_range is not None:
+        if len(args.line_range) > 1:
+            print("参数错误：--line-range 只能提供一次", file=sys.stderr)
+            return 2
+        line_range = parse_line_range(args.line_range[0])
+        if line_range is None:
+            print(
+                "参数错误：--line-range 必须是 START:END 形式，"
+                "两端为不含符号和空白的正十进制整数",
+                file=sys.stderr,
+            )
+            return 2
+        if "0" in line_range:
+            print("参数错误：--line-range 的端点不能为零", file=sys.stderr)
+            return 2
+        if compare_decimal_strings(line_range[0], line_range[1]) > 0:
+            print("参数错误：--line-range 的起点不能大于终点", file=sys.stderr)
+            return 2
+
     # newline="" 关闭通用换行转换：不紧邻 LF 的单独 CR 必须原样保留，
     # 不能在读取时被翻译成 LF 而拆开物理行。
     try:
@@ -168,6 +211,18 @@ def main(argv=None):
     matches, warnings = iter_matches(
         lines, levels, request_ids, since, until, message_contains
     )
+    # 行号区间只限制匹配结果，不影响全文件诊断：warnings 保持原样，
+    # 区间外的损坏 JSON、顶层非对象、无效级别及（启用时间筛选时）
+    # 无效 timestamp 照常警告；区间外的匹配行静默不输出、不计数。
+    # 行号为原始物理行号，过滤后不重排、不重新编号。
+    if line_range is not None:
+        start, end = line_range
+        matches = [
+            (lineno, raw)
+            for lineno, raw in matches
+            if compare_decimal_strings(start, str(lineno)) <= 0
+            and compare_decimal_strings(str(lineno), end) <= 0
+        ]
     for lineno, message in warnings:
         print(f"第 {lineno} 行：{message}", file=sys.stderr)
     if args.summary:

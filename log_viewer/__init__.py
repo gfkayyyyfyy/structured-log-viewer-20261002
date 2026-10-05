@@ -31,6 +31,44 @@ def parse_timestamp(value):
         return None
 
 
+# --line-range 的 START:END 形式：两端都是至少一位的 ASCII 十进制数字，
+# 不允许符号、空白、其他分隔符或多出的冒号；前导零允许（解析时规范化去除）。
+# 用 [0-9] 而非 \d：后者还会匹配全角数字等其他 Unicode 十进制字符。
+LINE_RANGE_PATTERN = re.compile(r"^([0-9]+):([0-9]+)\Z")
+
+
+def parse_line_range(value):
+    """解析 --line-range 的 START:END 区间文本。
+
+    两端都必须是只含 ASCII 十进制数字的非空串（允许前导零，不接受符号、
+    空白或多余冒号）。合法时返回 (start, end)，为去掉前导零后的十进制
+    数字符串（全零规范化为 "0"）；不做 int 转换，因此位数不受
+    sys.get_int_max_str_digits 限制。格式非法时返回 None；
+    端点是否为零、起点是否大于终点由调用方结合 compare_decimal_strings
+    判定。
+    """
+    if not isinstance(value, str):
+        return None
+    match = LINE_RANGE_PATTERN.match(value)
+    if not match:
+        return None
+    start, end = (digits.lstrip("0") or "0" for digits in match.groups())
+    return start, end
+
+
+def compare_decimal_strings(left, right):
+    """比较两个无前导零的十进制数字符串，返回 -1、0 或 1。
+
+    先比位数再按字典序比较，等价于数值比较，但不经过 int 转换，
+    因此不受 sys.get_int_max_str_digits 的位数限制。
+    """
+    if len(left) != len(right):
+        return -1 if len(left) < len(right) else 1
+    if left == right:
+        return 0
+    return -1 if left < right else 1
+
+
 def normalize_level(value):
     """规范化级别字符串：去除首尾空白并转大写。非字符串返回 None。"""
     if not isinstance(value, str):
