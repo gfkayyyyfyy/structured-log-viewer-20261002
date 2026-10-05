@@ -77,7 +77,7 @@ def normalize_level(value):
 
 
 def iter_matches(lines, level, request_id=None, since=None, until=None,
-                 message_contains=None):
+                 message_contains=None, message_excludes=None):
     """遍历物理行，产出 (行号, 原始行, 警告)。
 
     lines 为已按行拆分且去掉行末换行符的字符串序列（行号从 1 开始）。
@@ -106,6 +106,15 @@ def iter_matches(lines, level, request_id=None, since=None, until=None,
     解码后的文字比较；候选重复、序列顺序或一条消息同时命中多个候选都不
     影响结果：始终按文件行序，每条记录至多进入 matches 一次。字段缺失、
     为 null 或非字符串（或只在嵌套对象中出现）仅视为不匹配，不产生警告。
+    message_excludes 为 None 时不做排除检查；为字符串时按单个排除值处理，
+    也可传入排除值字符串序列，此时顶层 message 字段是字符串且包含其中
+    任一排除值的记录被剔除（与级别、请求标识、时间及 message_contains
+    条件取交集：记录须先满足包含条件，且不能命中任何排除值）。每个排除值
+    都是区分大小写的连续子串匹配，双方都不去除首尾空白，星号、句点等按
+    普通文字处理；排除值重复、序列顺序或一条消息同时命中多个排除值都不
+    影响结果。message 缺失、为 null、非字符串或只在嵌套对象中出现的记录
+    不因排除条件被丢弃，也不因此产生警告。启用时间筛选时，timestamp 检查
+    先于排除判定，消息被排除的记录若 timestamp 无效仍照常警告。
     返回 (matches, warnings)，均为 (行号, 文本) 列表。
     """
     # 字符串按单级别处理；其余按级别序列处理，记录命中其中任一即通过。
@@ -128,6 +137,15 @@ def iter_matches(lines, level, request_id=None, since=None, until=None,
         message_needles = (message_contains,)
     else:
         message_needles = tuple(message_contains)
+    # message_excludes 同理：字符串按单个排除值处理，序列按排除值集合处理，
+    # 顶层 message 命中其中任一值即被剔除。any 短路判定，排除值重复不改变
+    # 匹配集合；非字符串的 message 不触发排除。
+    if message_excludes is None:
+        message_rejects = None
+    elif isinstance(message_excludes, str):
+        message_rejects = (message_excludes,)
+    else:
+        message_rejects = tuple(message_excludes)
     matches = []
     warnings = []
     for lineno, raw in enumerate(lines, start=1):
@@ -171,6 +189,14 @@ def iter_matches(lines, level, request_id=None, since=None, until=None,
             # 嵌套对象中的 message 不会被触及。
             if not isinstance(value, str) or not any(
                 needle in value for needle in message_needles
+            ):
+                continue
+        if message_rejects is not None:
+            value = record.get("message")
+            # 仅当顶层 message 是字符串且包含任一排除值时剔除；字段缺失、
+            # 为 null 或非字符串的记录不因排除条件被丢弃，也不产生警告。
+            if isinstance(value, str) and any(
+                needle in value for needle in message_rejects
             ):
                 continue
         if since is not None and record_time < since:
