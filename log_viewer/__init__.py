@@ -39,7 +39,7 @@ def normalize_level(value):
 
 
 def iter_matches(lines, level, request_id=None, since=None, until=None,
-                 message_contains=None):
+                 message_contains=None, line_range=None):
     """遍历物理行，产出 (行号, 原始行, 警告)。
 
     lines 为已按行拆分且去掉行末换行符的字符串序列（行号从 1 开始）。
@@ -68,6 +68,12 @@ def iter_matches(lines, level, request_id=None, since=None, until=None,
     解码后的文字比较；候选重复、序列顺序或一条消息同时命中多个候选都不
     影响结果：始终按文件行序，每条记录至多进入 matches 一次。字段缺失、
     为 null 或非字符串（或只在嵌套对象中出现）仅视为不匹配，不产生警告。
+    line_range 为 None 时不按行号限制（与旧版调用约定完全兼容）；否则为
+    (起点, 终点) 正整数二元组（两端均包含，起点不大于终点），只有原始
+    物理行号落在区间内的记录才能通过其余筛选进入 matches；行号不重新
+    编号，输出仍用原始物理行号。范围只限制匹配，不限制诊断：区间外的
+    空白行照常跳过，区间外的损坏 JSON、顶层非对象、级别无效以及启用
+    时间检查时 timestamp 无效的记录照常产出警告并计入 warnings。
     返回 (matches, warnings)，均为 (行号, 文本) 列表。
     """
     # 字符串按单级别处理；其余按级别序列处理，记录命中其中任一即通过。
@@ -92,6 +98,7 @@ def iter_matches(lines, level, request_id=None, since=None, until=None,
         message_needles = tuple(message_contains)
     matches = []
     warnings = []
+    range_start, range_end = (None, None) if line_range is None else line_range
     for lineno, raw in enumerate(lines, start=1):
         if not raw.strip():
             continue
@@ -135,6 +142,11 @@ def iter_matches(lines, level, request_id=None, since=None, until=None,
         if since is not None and record_time < since:
             continue
         if until is not None and record_time >= until:
+            continue
+        # 行号区间与其余筛选取交集：只限制 matches，不影响上面的警告。
+        if range_start is not None and not (
+            range_start <= lineno <= range_end
+        ):
             continue
         matches.append((lineno, raw))
     return matches, warnings

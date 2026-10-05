@@ -31,7 +31,10 @@ argparse 解析参数后，按固定顺序校验，任一失败即向标准错�
    为空字符串或全空白即参数错误（即使其他值合法）  （第 104-113 行）
 5. --since 经 parse_timestamp() 解析        （第 98-106 行）
 6. --until 经 parse_timestamp() 解析        （第 109-117 行）
-7. --since 晚于 --until 为错误；相等是合法空区间（第 120-122 行）
+7. --since 晚于 --until 为错误；相等是合法空区间
+8. --line-range 形式与取值校验：只能提供一次；值须为 START:END，
+   两端均为 ASCII 正十进制整数（允许前导零）；端点不能为零，
+   起点不能大于终点。任一不满足即参数错误。
 
 1.2 文件读取与物理行拆分
 
@@ -43,10 +46,11 @@ argparse 解析参数后，按固定顺序校验，任一失败即向标准错�
 
 1.3 iter_matches 的逐行判定顺序
 
-main() 在第 151-153 行调用
-iter_matches(lines, levels, request_id, since, until, message_contains)，
+main() 在第 151-153 行附近调用
+iter_matches(lines, levels, request_ids, since, until, message_contains,
+line_range=line_range)，
 返回 (matches, warnings) 两个 (行号, 文本) 列表。iter_matches
-（__init__.py 第 41-107 行）对每一行按以下顺序判定，任一环节 continue
+（__init__.py iter_matches 函数）对每一行按以下顺序判定，任一环节 continue
 即进入下一行——这是“每行最多一条警告”的结构性保证：
 
   a. 空白行（去除首尾空白后为空）：静默跳过，不占警告，但占行号
@@ -67,14 +71,20 @@ iter_matches(lines, levels, request_id, since, until, message_contains)，
   h. message 不包含任一给定候选子串（可重复提供，多候选取并集；
      含字段缺失、为 null、非字符串）：静默跳过，无警告（第 98-101 行
      附近；iter_matches 也接受单个字符串，与旧调用约定兼容）。
-  i. record_time < since：静默跳过（含起点，第 102-103 行）。
-  j. record_time >= until：静默跳过（不含终点，第 104-105 行）。
-  k. 全部通过：加入 matches（第 106 行）。
+  i. record_time < since：静默跳过（含起点）。
+  j. record_time >= until：静默跳过（不含终点）。
+  k. 若给出 --line-range START:END 而该行物理行号不在闭区间
+     [START, END] 内：静默跳过。此判定位于所有无效性检查（b-e）
+     之后，因此区间只限制匹配、不限制诊断：范围外的损坏 JSON、
+     顶层非对象、无效级别照常警告，启用时间筛选时范围外 timestamp
+     无效的合法级别记录也照常警告；未传该选项时此步不存在。
+  l. 全部通过：加入 matches。
 
-关键结论：步骤 b-e 是“无效行警告”（数据本身不合法），步骤 f-j 是“静默跳过”
+关键结论：步骤 b-e 是“无效行警告”（数据本身不合法），步骤 f-k 是“静默跳过”
 （数据合法但不满足筛选条件）。警告只看数据合法性，不看是否命中筛选；
 因此未命中筛选条件的行仍可能因 b-e 产生警告，而合法但未命中的行绝不产生
-警告。
+警告。特别地，--line-range 只在步骤 k 收窄匹配集合，从不抑制 b-e 的警告，
+所以 invalid_count 恒为全文件警告数，与区间无关。
 
 1.4 三种输出模式（互斥关系与格式均保持不变）
 
@@ -238,14 +248,19 @@ warnings.append(...) 之后紧跟 continue，且判定 b-e 按顺序串行执行
 与无效行警告（退出码仍为 0）不同，以下两类失败在任何文件内容被处理前
 即终止，标准输出保持为空，错误信息写标准错误，退出码为 2：
 
-- 参数错误（__main__.py 第 66-122 行）：--jsonl 与 --summary 同用、
+- 参数错误（__main__.py main() 参数校验段）：--jsonl 与 --summary 同用、
   --level 值为空/全空白/不受支持、--request-id 为空或全空白、
   任一 --message-contains 值为空或全空白（该选项可重复给出，
   其他值合法也不能覆盖该错误）、--since/--until 格式非法、
-  --since 晚于 --until。
+  --since 晚于 --until，以及 --line-range 重复提供、取值不是
+  START:END 形式、端点非 ASCII 正十进制整数（含缺值、空值、符号、
+  空白、其他 Unicode 数字）、端点为零或起点大于终点。
   此外完全缺少 --level 或某次缺值由 argparse 本身以退出码 2 处理。
-- 文件读取失败（第 126-131 行）：路径不存在、是目录、无权限或内容不是
-  合法 UTF-8，打印“文件读取失败：<路径>（<异常>）”。
+  --line-range 在参数校验顺序中位于最后（第 8 步），其他参数错误
+  优先报告；区间校验同样发生在打开文件之前。
+- 文件读取失败：路径不存在、是目录、无权限或内容不是
+  合法 UTF-8（即使非法字节位于 --line-range 区间之外，整份文件仍
+  读取失败），打印“文件读取失败：<路径>（<异常>）”。
 
 实际执行记录（当前源码实测）：
 
@@ -263,10 +278,12 @@ warnings.append(...) 之后紧跟 continue，且判定 b-e 按顺序串行执行
 7. 兼容性说明
 -------------
 
-本文仅为诊断说明，不改变任何行为：main()、iter_matches()、
-parse_timestamp()、normalize_level() 的调用与返回约定（iter_matches
-返回 (matches, warnings) 两个 (行号, 文本) 列表）、默认/--summary/
+本文为诊断说明：--line-range 仅在判定链末端（步骤 k）新增一个静默跳过
+条件，默认（不传或 iter_matches 的 line_range=None）时该步不存在，
+main()、iter_matches()、parse_timestamp()、normalize_level() 的既有
+调用与返回约定（iter_matches 返回 (matches, warnings) 两个 (行号, 文本)
+列表，line_range 为可选关键字参数）、默认/--summary/
 --jsonl 三种输出模式的格式与互斥关系、退出码约定（正常 0、参数错误与
-读取失败 2）均保持现状。文中“预期结果”一节由源码判定顺序推导，
+读取失败 2）均保持兼容。文中“预期结果”一节由源码判定顺序推导，
 “实际执行记录”一节为对当前源码的真实运行结果，两者已分别标注；
 若源码日后变更，请以重新执行的记录为准。

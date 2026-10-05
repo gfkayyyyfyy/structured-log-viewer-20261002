@@ -259,9 +259,11 @@ BOM 之后若存在非法 UTF-8 字节仍按文件读取失败处理。
 8. 兼容性说明
 -------------
 
-本文仅为流程说明，不改变任何行为：main()、iter_matches() 的调用与
-返回约定，--level、--request-id、--since/--until、--message-contains、
---summary、--jsonl 各参数的语义，默认/--summary/--jsonl 三种输出模式
-的格式与互斥关系，无效行警告规则，以及退出码约定（正常 0、参数错误
-与文件读取失败 2）均保持现状。其他筛选、摘要和警告规则不因本文所述
-流程而改变。
+本文为流程说明：--jsonl 导出路径对新增的 --line-range START:END
+（物理行号闭区间，只限制匹配、不影响警告）同样适用——导出只输出区间内
+命中记录的原始正文并补 LF，行号不重新编号（导出行本无前缀）；main()、
+iter_matches() 的调用与返回约定，--level、--request-id、--since/
+--until、--message-contains、--line-range、--summary、--jsonl 各参数
+的语义，默认/--summary/--jsonl 三种输出模式的格式与互斥关系，无效行
+警告规则，以及退出码约定（正常 0、参数错误与文件读取失败 2）均保持
+兼容。其他筛选、摘要和警告规则不因本文所述流程而改变。

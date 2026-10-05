@@ -1,10 +1,16 @@
-"""命令行入口：python -m log_viewer <文件路径> --level <级别> [--level <级别> ...] [--request-id <标识> ...] [--message-contains <子串> ...]"""
+"""命令行入口：python -m log_viewer <文件路径> --level <级别> [--level <级别> ...] [--request-id <标识> ...] [--message-contains <子串> ...] [--line-range START:END]"""
 
 import argparse
 import json
+import re
 import sys
 
 from . import SUPPORTED_LEVELS, iter_matches, normalize_level, parse_timestamp
+
+# --line-range 的端点：只接受 ASCII 正十进制整数，允许前导零；
+# [0-9] 而非 \d，排除阿拉伯-印度数字等其他 Unicode 十进制字符，
+# 也天然拒绝符号、空白与空串。
+LINE_RANGE_ENDPOINT_PATTERN = re.compile(r"^[0-9]+\Z")
 
 
 def main(argv=None):
@@ -52,6 +58,22 @@ def main(argv=None):
              "再与级别、请求标识和时间条件取交集；候选重复或顺序不影响"
              "结果，一条消息命中多个候选也只输出一次；"
              "message 缺失、为 null 或非字符串的记录静默不匹配",
+    )
+    parser.add_argument(
+        "--line-range",
+        action="append",
+        default=None,
+        metavar="START:END",
+        help="可选：按原始物理行号（从 1 开始）把匹配结果限定在闭区间内，"
+             "START、END 均包含且 START 不大于 END，例如 --line-range 10:20；"
+             "两端只接受 ASCII 正十进制整数（允许前导零，不接受符号或空白），"
+             "两端相等时只选一行；与级别、请求标识、消息和时间条件取交集，"
+             "命中行仍用原始行号按原文件行序输出，不重新编号。区间只限制"
+             "匹配，不影响全文件诊断：范围外的损坏 JSON、顶层非对象、"
+             "无效级别照常警告，启用时间筛选时范围外 timestamp 无效的"
+             "合法级别记录也照常警告。终点超过文件末尾时照常筛选；起点"
+             "超过文件末尾或文件为空时无匹配。缺值、空值、格式非法、"
+             "端点为零、起点大于终点或重复提供该选项均为参数错误",
     )
     parser.add_argument(
         "--summary",
@@ -138,6 +160,52 @@ def main(argv=None):
         print("参数错误：--since 不能晚于 --until", file=sys.stderr)
         return 2
 
+    # 未传 --line-range 时为 None；重复提供直接拒绝（action="append"
+    # 收集为多元素列表），不挑选其中任一值。所有校验都在读取文件之前。
+    line_range = None
+    if args.line_range is not None:
+        if len(args.line_range) > 1:
+            print("参数错误：--line-range 只能提供一次", file=sys.stderr)
+            return 2
+        raw_range = args.line_range[0]
+        # 必须恰好含一个冒号且两侧都是非空的 ASCII 正十进制数字串：
+        # 缺端点、空值、多余冒号、符号、空白或非 ASCII 数字一律拒绝。
+        parts = raw_range.split(":")
+        if len(parts) != 2 or not all(
+            LINE_RANGE_ENDPOINT_PATTERN.match(part) for part in parts
+        ):
+            print(
+                "参数错误：--line-range 必须为 START:END 形式，"
+                "START、END 均为不带符号和空白的 ASCII 正十进制整数",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            range_start, range_end = int(parts[0]), int(parts[1])
+        except ValueError:
+            # 正则已限定为 ASCII 数字串；此处只可能因 Python 3.11+ 的
+            # 整数转换位数限制（sys.get_int_max_str_digits）失败，
+            # 同样按参数错误处理，不读文件、不抛异常堆栈。
+            print(
+                "参数错误：--line-range 的端点数值无法解析",
+                file=sys.stderr,
+            )
+            return 2
+        # 前导零合法（"001"），但整数值为零（含 "000"）的端点非法。
+        if range_start == 0 or range_end == 0:
+            print(
+                "参数错误：--line-range 的端点必须为正整数，不能为零",
+                file=sys.stderr,
+            )
+            return 2
+        if range_start > range_end:
+            print(
+                "参数错误：--line-range 的起点不能大于终点",
+                file=sys.stderr,
+            )
+            return 2
+        line_range = (range_start, range_end)
+
     # newline="" 关闭通用换行转换：不紧邻 LF 的单独 CR 必须原样保留，
     # 不能在读取时被翻译成 LF 而拆开物理行。
     try:
@@ -166,7 +234,8 @@ def main(argv=None):
         for index, part in enumerate(parts)
     ]
     matches, warnings = iter_matches(
-        lines, levels, request_ids, since, until, message_contains
+        lines, levels, request_ids, since, until, message_contains,
+        line_range=line_range,
     )
     for lineno, message in warnings:
         print(f"第 {lineno} 行：{message}", file=sys.stderr)
