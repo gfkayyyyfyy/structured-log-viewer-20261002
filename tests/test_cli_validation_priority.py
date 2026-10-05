@@ -11,6 +11,10 @@
     5. --since 的 UTC 格式
     6. --until 的 UTC 格式
     7. --since 不晚于 --until
+    8. --line-range 重复提供
+    9. --line-range 区间格式
+   10. --line-range 端点非零
+   11. --line-range 起点不大于终点
 
 全部参数校验通过之后才进入文件读取阶段。
 
@@ -38,6 +42,18 @@
   路径（系统异常细节不作固定要求）；
 - 用临时文件中的非法 UTF-8 字节复核输出开关互斥这一最高优先级：即使
   文件读取必然失败，结果仍只有互斥错误，以此区分参数拒绝与文件读取错误。
+
+行号区间排在固定顺序的最后，其内部顺序为重复提供、格式、零端点、
+起点大于终点；本模块补充区间与其他错误并存的回归：
+- 不存在的路径同时带 --level TRACE、--jsonl、--summary 和非法区间
+  0:2 时只报告互斥错误；去掉 --jsonl 后只报告级别错误；
+- 其余参数合法、区间重复提供且其中含非法值时，只报告“只能提供一次”
+  （重复提供先于区间内容的任何检查，非法值不被掩盖也不被覆盖）；
+- 合法 ERROR 级别、相等的起止时间与合法区间通过全部校验，随后仅因
+  路径不存在返回 2：标准输出为空，标准错误只报告文件读取失败而不含
+  任何参数错误；
+- 区间的格式、零端点、起点大于终点在与不存在的路径并存时仍是首个且
+  唯一的错误；区间选项在命令行中的位置不改变结论。
 
 测试数据与不存在的路径均由用例在临时目录中准备并自动清理，不依赖仓库
 样例（sample.jsonl 等）或外部服务；比较按原始字节进行（不开 text=True），
@@ -73,6 +89,15 @@ ERROR_MESSAGE_CONTAINS = "参数错误：--message-contains 不能为空或全�
 ERROR_SINCE = "参数错误：--since 必须是 YYYY-MM-DDTHH:MM:SSZ 格式的 UTC 时间"
 ERROR_UNTIL = "参数错误：--until 必须是 YYYY-MM-DDTHH:MM:SSZ 格式的 UTC 时间"
 ERROR_ORDER = "参数错误：--since 不能晚于 --until"
+# --line-range 的错误排在固定顺序最后，内部顺序为：
+# 重复提供 → 格式 → 零端点 → 起点大于终点。
+ERROR_LINE_RANGE_DUPLICATE = "参数错误：--line-range 只能提供一次"
+ERROR_LINE_RANGE_FORMAT = (
+    "参数错误：--line-range 必须是 START:END 形式，"
+    "两端为不含符号和空白的正十进制整数"
+)
+ERROR_LINE_RANGE_ZERO = "参数错误：--line-range 的端点不能为零"
+ERROR_LINE_RANGE_ORDER = "参数错误：--line-range 的起点不能大于终点"
 
 READ_FAILURE_MESSAGE = "文件读取失败".encode("utf-8")
 INVALID_LOG_WARNING = "无效日志".encode("utf-8")
@@ -282,6 +307,156 @@ class ValidationPriorityTests(unittest.TestCase):
         self.assertEqual(
             proc.stderr,
             ERROR_MUTEX.encode("utf-8") + RECORD_TERMINATOR,
+        )
+
+    def test_line_range_outranked_by_mutex_and_level(self):
+        """非法区间与互斥、级别错误并存：只出现固定顺序中最先的错误。"""
+        # 不存在的路径 + --level TRACE + --jsonl + --summary + 非法区间
+        # 0:2（零端点）：先报告互斥错误。
+        argv_with_both = build_argv(
+            self.missing_path,
+            [
+                ("--level", "TRACE"),
+                ("--jsonl", True),
+                ("--summary", True),
+                ("--line-range", "0:2"),
+            ],
+        )
+        proc = run_cli_bytes(argv_with_both)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertEqual(proc.stdout, b"")
+        self.assertEqual(
+            proc.stderr,
+            ERROR_MUTEX.encode("utf-8") + RECORD_TERMINATOR,
+        )
+
+        # 去掉 --jsonl 后：级别错误优先于区间的零端点错误。
+        argv_without_jsonl = build_argv(
+            self.missing_path,
+            [
+                ("--level", "TRACE"),
+                ("--summary", True),
+                ("--line-range", "0:2"),
+            ],
+        )
+        proc = run_cli_bytes(argv_without_jsonl)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertEqual(proc.stdout, b"")
+        self.assertEqual(
+            proc.stderr,
+            ERROR_LEVEL.encode("utf-8") + RECORD_TERMINATOR,
+        )
+
+    def test_duplicate_line_range_with_invalid_value_reports_duplicate(self):
+        """其余参数合法：区间重复且含非法值时只报告重复提供。
+
+        重复提供先于区间内容的格式、零端点、顺序检查；非法值既不掩盖
+        重复错误，也不能因另一值合法而被覆盖。
+        """
+        cases = [
+            ("首值非法格式、次值合法", ["0:2", "3:4"]),
+            ("首值合法、次值零端点", ["1:2", "0:4"]),
+            ("首值零端点、次值起点大于终点", ["0:2", "9:1"]),
+            ("两值均非法", ["bogus", "0:0"]),
+        ]
+        for label, ranges in cases:
+            argv = build_argv(
+                self.missing_path,
+                [
+                    ("--level", "ERROR"),
+                    ("--line-range", ranges[0]),
+                    ("--line-range", ranges[1]),
+                ],
+            )
+            with self.subTest(场景=label, argv=argv):
+                proc = run_cli_bytes(argv)
+                self.assertEqual(proc.returncode, 2, proc.stderr)
+                self.assertEqual(proc.stdout, b"")
+                self.assertEqual(
+                    proc.stderr,
+                    ERROR_LINE_RANGE_DUPLICATE.encode("utf-8")
+                    + RECORD_TERMINATOR,
+                )
+
+    def test_valid_options_equal_times_and_range_reach_file_read(self):
+        """合法 ERROR 级别、相等起止时间与合法区间：通过校验后读取失败。"""
+        argv = build_argv(
+            self.missing_path,
+            [
+                ("--level", "ERROR"),
+                ("--since", "2026-10-03T10:00:00Z"),
+                ("--until", "2026-10-03T10:00:00Z"),
+                ("--line-range", "001:002"),
+            ],
+        )
+        proc = run_cli_bytes(argv)
+
+        self.assertEqual(
+            proc.returncode, 2,
+            f"应退出 2，实际 {proc.returncode}；stderr={proc.stderr!r}",
+        )
+        self.assertEqual(proc.stdout, b"")
+        # 标准错误只报告文件读取失败：不含任何参数错误或“无效日志”警告。
+        self.assertIn(READ_FAILURE_MESSAGE, proc.stderr)
+        self.assertIn(os.fsencode(str(self.missing_path)), proc.stderr)
+        self.assertNotIn("参数错误".encode("utf-8"), proc.stderr)
+        self.assertNotIn(INVALID_LOG_WARNING, proc.stderr)
+        self.assertNotIn(TRACEBACK, proc.stderr)
+
+    def test_line_range_inner_errors_are_first_and_only_error(self):
+        """区间的格式、零端点、起点大于终点：与缺失路径并存时仍唯一报出。"""
+        cases = [
+            ("格式非法", "1:", ERROR_LINE_RANGE_FORMAT),
+            ("零端点", "0:2", ERROR_LINE_RANGE_ZERO),
+            ("起点大于终点", "9:1", ERROR_LINE_RANGE_ORDER),
+        ]
+        for label, value, expected_message in cases:
+            argv = build_argv(
+                self.missing_path,
+                [
+                    ("--level", "ERROR"),
+                    ("--line-range", value),
+                ],
+            )
+            with self.subTest(场景=label, argv=argv):
+                proc = run_cli_bytes(argv)
+                self.assertEqual(proc.returncode, 2, proc.stderr)
+                self.assertEqual(proc.stdout, b"")
+                self.assertEqual(
+                    proc.stderr,
+                    expected_message.encode("utf-8") + RECORD_TERMINATOR,
+                )
+
+    def test_line_range_option_position_does_not_change_result(self):
+        """区间选项与其他选项的相对位置不改变优先级结论。"""
+        # 区间放在最前、位置参数最后：重复提供仍只报重复错误。
+        shuffled_duplicate = [
+            "--line-range", "0:2",
+            "--level", "ERROR",
+            "--line-range", "3:4",
+            str(self.missing_path),
+        ]
+        proc = run_cli_bytes(shuffled_duplicate)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertEqual(proc.stdout, b"")
+        self.assertEqual(
+            proc.stderr,
+            ERROR_LINE_RANGE_DUPLICATE.encode("utf-8") + RECORD_TERMINATOR,
+        )
+
+        # 合法区间放在最前、路径最后且级别非法：仍只报级别错误。
+        shuffled_level = [
+            "--line-range", "1:2",
+            "--summary",
+            "--level", "TRACE",
+            str(self.missing_path),
+        ]
+        proc = run_cli_bytes(shuffled_level)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertEqual(proc.stdout, b"")
+        self.assertEqual(
+            proc.stderr,
+            ERROR_LEVEL.encode("utf-8") + RECORD_TERMINATOR,
         )
 
 

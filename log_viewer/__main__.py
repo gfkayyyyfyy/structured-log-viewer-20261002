@@ -14,6 +14,119 @@ from . import (
 )
 
 
+def _fail(message):
+    """向标准错误写一条参数错误（保留末尾换行）并返回 None。
+
+    所有校验失败都经由此函数：标准输出保持为空，由调用方据此返回退出码 2，
+    且失败发生在读取文件之前。
+    """
+    print(message, file=sys.stderr)
+    return None
+
+
+def _validate_options(args):
+    """校验参数解析器已接受的输入，全部在读取文件之前完成。
+
+    多个问题同时存在时只报告下面固定顺序中的第一个；选项在命令行中的排列
+    不影响该顺序。失败返回 None（错误已写入标准错误）；成功返回包含校验后
+    取值的字典：levels（已规范化）、request_ids、message_contains、
+    since、until、line_range（均可能为 None）。
+
+      1. --jsonl 与 --summary 互斥
+      2. 每个 --level 的级别合法性（逐个校验）
+      3. 每个 --request-id 非空白（逐个校验，合法值保留首尾空白）
+      4. 每个 --message-contains 非空白（逐个校验，合法值保留首尾空白）
+      5. --since 的 UTC 格式
+      6. --until 的 UTC 格式
+      7. --since 不晚于 --until（起止相等合法）
+      8. --line-range：重复提供 → 格式 → 零端点 → 起点大于终点
+    """
+    # 1. 两种输出模式互斥：在读取文件之前拒绝，标准输出保持为空。
+    if args.jsonl and args.summary:
+        return _fail("参数错误：--jsonl 与 --summary 不能同时使用")
+
+    # 2. --level 可重复提供：每个值各自规范化（忽略大小写及首尾空白），
+    # 任一值为空、全空白或不受支持都判为参数错误，后续合法值不能覆盖。
+    levels = []
+    for raw_level in args.level:
+        level = normalize_level(raw_level)
+        if level not in SUPPORTED_LEVELS:
+            return _fail(
+                "参数错误：--level 必须是以下级别之一："
+                + ", ".join(SUPPORTED_LEVELS)
+            )
+        levels.append(level)
+
+    # 3. 未传 --request-id 时为 None；可重复提供，每个值各自校验，任一值
+    # 为空字符串或全空白都判为参数错误，后续合法值不能覆盖。合法值原样
+    # 保留：不去除首尾空白。
+    request_ids = args.request_id
+    if request_ids is not None:
+        for request_id in request_ids:
+            if not request_id.strip():
+                return _fail("参数错误：--request-id 不能为空或全为空白")
+
+    # 4. 未传 --message-contains 时为 None；可重复提供，每个值各自校验，
+    # 任一值为空字符串或全空白都判为参数错误，即使其他值合法也不能覆盖。
+    # 合法值原样保留：不去除首尾空白，星号、句点按普通文字处理。
+    message_contains = args.message_contains
+    if message_contains is not None:
+        for needle in message_contains:
+            if not needle.strip():
+                return _fail(
+                    "参数错误：--message-contains 不能为空或全为空白"
+                )
+
+    # 5/6. 未传时为 None；传了但为空或格式非法视为参数错误，不读取文件。
+    since = None
+    if args.since is not None:
+        since = parse_timestamp(args.since)
+        if since is None:
+            return _fail(
+                "参数错误：--since 必须是 YYYY-MM-DDTHH:MM:SSZ 格式的 UTC 时间"
+            )
+    until = None
+    if args.until is not None:
+        until = parse_timestamp(args.until)
+        if until is None:
+            return _fail(
+                "参数错误：--until 必须是 YYYY-MM-DDTHH:MM:SSZ 格式的 UTC 时间"
+            )
+
+    # 7. 起点严格晚于终点为参数错误；起止相等是合法的空区间。
+    if since is not None and until is not None and since > until:
+        return _fail("参数错误：--since 不能晚于 --until")
+
+    # 8. 未传 --line-range 时为 None。先拒绝重复提供；区间文本必须是
+    # START:END：两端为只含 ASCII 数字的正十进制整数（允许前导零，不接受
+    # 符号或空白）；端点为零、起点大于终点同样在读取文件之前拒绝。
+    # 端点以去前导零的数字符串保存，不转 int，位数不受
+    # sys.get_int_max_str_digits 限制。
+    line_range = None
+    if args.line_range is not None:
+        if len(args.line_range) > 1:
+            return _fail("参数错误：--line-range 只能提供一次")
+        line_range = parse_line_range(args.line_range[0])
+        if line_range is None:
+            return _fail(
+                "参数错误：--line-range 必须是 START:END 形式，"
+                "两端为不含符号和空白的正十进制整数"
+            )
+        if "0" in line_range:
+            return _fail("参数错误：--line-range 的端点不能为零")
+        if compare_decimal_strings(line_range[0], line_range[1]) > 0:
+            return _fail("参数错误：--line-range 的起点不能大于终点")
+
+    return {
+        "levels": levels,
+        "request_ids": request_ids,
+        "message_contains": message_contains,
+        "since": since,
+        "until": until,
+        "line_range": line_range,
+    }
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="python -m log_viewer",
@@ -86,100 +199,17 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
-    # 两种输出模式互斥：在读取文件之前拒绝，标准输出保持为空。
-    if args.jsonl and args.summary:
-        print("参数错误：--jsonl 与 --summary 不能同时使用", file=sys.stderr)
+    # 参数解析成功之后、读取文件之前的全部校验：错误优先级固定且与选项
+    # 排列无关；失败时标准输出为空、退出码为 2，且不读取文件。
+    options = _validate_options(args)
+    if options is None:
         return 2
-
-    # --level 可重复提供：每个值各自规范化（忽略大小写及首尾空白），任一值
-    # 为空、全空白或不受支持都判为参数错误，后续合法值不能覆盖该错误，
-    # 且所有参数校验都在读取文件之前完成。
-    levels = []
-    for raw_level in args.level:
-        level = normalize_level(raw_level)
-        if level not in SUPPORTED_LEVELS:
-            print(
-                f"参数错误：--level 必须是以下级别之一：{', '.join(SUPPORTED_LEVELS)}",
-                file=sys.stderr,
-            )
-            return 2
-        levels.append(level)
-
-    # 未传 --request-id 时为 None；可重复提供，每个值各自校验，任一次
-    # 为空字符串或全空白都判为参数错误，后续合法值不能覆盖该错误，
-    # 且校验在读取文件之前完成。合法值原样保留：不去除首尾空白。
-    request_ids = args.request_id
-    if request_ids is not None:
-        for request_id in request_ids:
-            if not request_id.strip():
-                print("参数错误：--request-id 不能为空或全为空白", file=sys.stderr)
-                return 2
-
-    # 未传 --message-contains 时为 None；可重复提供，每个值各自校验，
-    # 任一次为空字符串或全空白都判为参数错误，即使其他值合法也不能覆盖，
-    # 且校验在读取文件之前完成。合法值原样保留：不去除首尾空白，
-    # 星号、句点按普通文字处理。
-    message_contains = args.message_contains
-    if message_contains is not None:
-        for needle in message_contains:
-            if not needle.strip():
-                print(
-                    "参数错误：--message-contains 不能为空或全为空白",
-                    file=sys.stderr,
-                )
-                return 2
-
-    # 未传 --since 时为 None；传了但为空或格式非法视为参数错误，不读取文件。
-    since = None
-    if args.since is not None:
-        since = parse_timestamp(args.since)
-        if since is None:
-            print(
-                "参数错误：--since 必须是 YYYY-MM-DDTHH:MM:SSZ 格式的 UTC 时间",
-                file=sys.stderr,
-            )
-            return 2
-
-    # 未传 --until 时为 None；传了但为空或格式非法视为参数错误，不读取文件。
-    until = None
-    if args.until is not None:
-        until = parse_timestamp(args.until)
-        if until is None:
-            print(
-                "参数错误：--until 必须是 YYYY-MM-DDTHH:MM:SSZ 格式的 UTC 时间",
-                file=sys.stderr,
-            )
-            return 2
-
-    # 起点严格晚于终点为参数错误；起止相等是合法的空区间。
-    if since is not None and until is not None and since > until:
-        print("参数错误：--since 不能晚于 --until", file=sys.stderr)
-        return 2
-
-    # 未传 --line-range 时为 None；重复提供判为参数错误。区间文本必须是
-    # START:END：两端为只含 ASCII 数字的正十进制整数（允许前导零，不接受
-    # 符号或空白）；端点为零、起点大于终点同样在读取文件之前拒绝。
-    # 端点以去前导零的数字符串保存，不转 int，位数不受
-    # sys.get_int_max_str_digits 限制。
-    line_range = None
-    if args.line_range is not None:
-        if len(args.line_range) > 1:
-            print("参数错误：--line-range 只能提供一次", file=sys.stderr)
-            return 2
-        line_range = parse_line_range(args.line_range[0])
-        if line_range is None:
-            print(
-                "参数错误：--line-range 必须是 START:END 形式，"
-                "两端为不含符号和空白的正十进制整数",
-                file=sys.stderr,
-            )
-            return 2
-        if "0" in line_range:
-            print("参数错误：--line-range 的端点不能为零", file=sys.stderr)
-            return 2
-        if compare_decimal_strings(line_range[0], line_range[1]) > 0:
-            print("参数错误：--line-range 的起点不能大于终点", file=sys.stderr)
-            return 2
+    levels = options["levels"]
+    request_ids = options["request_ids"]
+    message_contains = options["message_contains"]
+    since = options["since"]
+    until = options["until"]
+    line_range = options["line_range"]
 
     # newline="" 关闭通用换行转换：不紧邻 LF 的单独 CR 必须原样保留，
     # 不能在读取时被翻译成 LF 而拆开物理行。
